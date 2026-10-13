@@ -8,6 +8,7 @@ fn main() -> Result<()> {
         Some("names") => { let p = Package::open(&args[2])?; for (i, n) in p.names.iter().enumerate() { println!("{i:4} {n}"); } Ok(()) }
         Some("textures") => textures(&args[2], &args[3]),
         Some("scan") => scan(&args[2..]),
+        Some("obj") => obj(&args[2], &args[3], &args[4]),
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!("usage: l2tool info <pkg>... | hex <pkg> <export> [n]"),
     }
@@ -57,6 +58,8 @@ fn textures(path: &str, out: &str) -> Result<()> {
 fn scan(dirs: &[String]) -> Result<()> {
     let mut classes: std::collections::BTreeMap<String, usize> = Default::default();
     let (mut pkgs, mut bad_pkgs, mut tex_ok, mut tex_fail) = (0, 0, 0, 0);
+    let (mut mesh_ok, mut mesh_fail) = (0, 0);
+    let skip_tex = std::env::var_os("SCAN_NO_TEX").is_some();
     let mut versions: std::collections::BTreeMap<(u16, u16), usize> = Default::default();
     for d in dirs {
         for entry in std::fs::read_dir(d)? {
@@ -77,7 +80,21 @@ fn scan(dirs: &[String]) -> Result<()> {
             *versions.entry((pkg.version, pkg.licensee)).or_default() += 1;
             for (i, e) in pkg.exports.iter().enumerate() {
                 let class = pkg.class_name(e).to_string();
-                if class == "Texture" {
+                if class == "StaticMesh" {
+                    match ue2::mesh::read_static_mesh(&pkg, i) {
+                        Ok(m) if m.indices.iter().all(|&x| (x as usize) < m.positions.len())
+                            && m.sections.iter().all(|s| ((s.first_index + s.num_faces * 3) as usize) <= m.indices.len()) => mesh_ok += 1,
+                        Ok(m) => {
+                            if mesh_fail < 20 { eprintln!("{}: {} inconsistent", path.display(), m.name); }
+                            mesh_fail += 1;
+                        }
+                        Err(err) => {
+                            if mesh_fail < 20 { eprintln!("{}: {}: {err}", path.display(), pkg.full_name(ue2::ObjectRef::Export(i))); }
+                            mesh_fail += 1;
+                        }
+                    }
+                }
+                if class == "Texture" && !skip_tex {
                     match ue2::texture::read_texture(&pkg, i) {
                         Ok(_) => tex_ok += 1,
                         Err(err) => {
@@ -94,6 +111,7 @@ fn scan(dirs: &[String]) -> Result<()> {
     }
     println!("packages: {pkgs} ok, {bad_pkgs} failed; versions {versions:?}");
     println!("textures: {tex_ok} decoded, {tex_fail} failed");
+    println!("static meshes: {mesh_ok} decoded, {mesh_fail} failed");
     let mut top: Vec<_> = classes.into_iter().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1));
     for (c, n) in top.iter().take(40) {
@@ -110,5 +128,33 @@ fn hex(path: &str, idx: usize, n: usize) -> Result<()> {
         let asc: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
         println!("{:06x}  {:<48} {asc}", row * 16, hex.join(" "));
     }
+    Ok(())
+}
+
+/// Writes a static mesh as Wavefront OBJ (Unreal axes, Z up).
+fn obj(path: &str, name: &str, out: &str) -> Result<()> {
+    use std::io::Write;
+    let pkg = Package::open(path)?;
+    let idx = pkg.find_export(name).with_context(|| format!("no export {name}"))?;
+    let m = ue2::mesh::read_static_mesh(&pkg, idx)?;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(out)?);
+    for p in &m.positions {
+        writeln!(f, "v {} {} {}", p[0], p[1], p[2])?;
+    }
+    for uv in &m.uvs {
+        writeln!(f, "vt {} {}", uv[0], 1.0 - uv[1])?;
+    }
+    for n in &m.normals {
+        writeln!(f, "vn {} {} {}", n[0], n[1], n[2])?;
+    }
+    for (si, s) in m.sections.iter().enumerate() {
+        writeln!(f, "g section{si}_{}", pkg.object_name(s.material))?;
+        let tris = &m.indices[s.first_index as usize..(s.first_index + s.num_faces * 3) as usize];
+        for t in tris.chunks_exact(3) {
+            let (a, b, c) = (t[0] + 1, t[1] + 1, t[2] + 1);
+            writeln!(f, "f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}")?;
+        }
+    }
+    println!("{}: {} verts, {} tris, {} sections", m.name, m.positions.len(), m.indices.len() / 3, m.sections.len());
     Ok(())
 }

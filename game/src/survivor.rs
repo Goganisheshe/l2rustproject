@@ -8,7 +8,20 @@ use bevy::prelude::*;
 use rand::Rng;
 
 use crate::input::PlayerInput;
-use crate::l2assets::L2Textures;
+use crate::l2assets::{L2Library, L2Textures};
+
+/// Scenery scattered around the arena, straight from the client's static
+/// meshes: (package, mesh, count, min distance from start, max distance, scale).
+const SCENERY: &[(&str, &str, u32, f32, f32, f32)] = &[
+    ("elmo_fielddeco_s", "Rune_grass001", 120, 2.0, 120.0, 1.0),
+    ("elmo_fielddeco_s", "Rune_grass002", 120, 2.0, 120.0, 1.0),
+    ("elmo_fielddeco_s", "godard_V_gr0001", 80, 2.0, 120.0, 1.0),
+    ("aden_fairy_valley_s", "fairy_rock01", 25, 8.0, 120.0, 0.25),
+    ("aden_fairy_valley_s", "fairy_rock03", 25, 8.0, 120.0, 0.25),
+    ("aden_tree_s", "Laketree01_A", 10, 30.0, 150.0, 1.0),
+    ("aden_tree_s", "aden_tree1A", 10, 30.0, 150.0, 1.0),
+    ("aden_tree_s", "orenGtree1_A", 10, 30.0, 150.0, 1.0),
+];
 
 const ARENA_TILE: f32 = 8.0;
 const SPAWN_RADIUS: f32 = 22.0;
@@ -219,6 +232,8 @@ fn setup_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<L2Textures>,
+    mut lib: ResMut<L2Library>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     // Huge tiled ground using a texture straight from the original client.
     let ground_size = 400.0;
@@ -235,6 +250,42 @@ fn setup_world(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(ground_size, ground_size))),
         MeshMaterial3d(materials.add(ground_mat)),
     ));
+
+    // L2_VIEW=<package>:<mesh> puts one static mesh right next to the start point.
+    let mut placements: Vec<((String, String), Vec3, f32, f32)> = Vec::new();
+    if let Ok(spec) = std::env::var("L2_VIEW") {
+        if let Some((p, o)) = spec.split_once(':') {
+            placements.push(((p.to_string(), o.to_string()), Vec3::new(0.0, 0.0, -6.0), 0.0, 1.0));
+        }
+    }
+    let mut rng = rand::rng();
+    for &(p, o, count, near, far, scale) in SCENERY {
+        for _ in 0..count {
+            let a = rng.random_range(0.0..TAU);
+            let d = rng.random_range(near..far);
+            let pos = Vec3::new(a.cos() * d, 0.0, a.sin() * d);
+            placements.push(((p.to_string(), o.to_string()), pos, rng.random_range(0.0..TAU), scale));
+        }
+    }
+    let mut cache: std::collections::HashMap<(String, String), Vec<crate::l2assets::MeshPart>> = Default::default();
+    for (key, pos, yaw, scale) in placements {
+        let parts = cache
+            .entry(key.clone())
+            .or_insert_with(|| lib.static_mesh(&key.0, &key.1, &mut meshes, &mut materials, &mut images).unwrap_or_default());
+        if parts.is_empty() {
+            continue;
+        }
+        commands
+            .spawn((
+                Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)).with_scale(Vec3::splat(scale)),
+                Visibility::default(),
+            ))
+            .with_children(|c| {
+                for part in parts.iter() {
+                    c.spawn((Mesh3d(part.mesh.clone()), MeshMaterial3d(part.material.clone())));
+                }
+            });
+    }
 
     commands.spawn((
         DirectionalLight { illuminance: 9000.0, shadow_maps_enabled: true, ..default() },

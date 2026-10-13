@@ -1,6 +1,8 @@
 //! Reader for Unreal Engine 2 packages as shipped with the Lineage II client.
 
 pub mod crypt;
+pub mod library;
+pub mod mesh;
 pub mod package;
 pub mod props;
 pub mod reader;
