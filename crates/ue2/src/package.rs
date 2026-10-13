@@ -154,6 +154,14 @@ impl Package {
         (0..self.exports.len()).filter(move |&i| self.class_name(&self.exports[i]).eq_ignore_ascii_case(class))
     }
 
+    /// Finds an export by object name or dotted `Group.Object` path.
+    pub fn find_export(&self, name: &str) -> Option<usize> {
+        (0..self.exports.len()).find(|&i| {
+            let r = ObjectRef::Export(i);
+            self.object_name(r).eq_ignore_ascii_case(name) || self.full_name(r).eq_ignore_ascii_case(name)
+        })
+    }
+
     pub fn find_name(&self, s: &str) -> Option<usize> {
         self.names.iter().position(|n| n.eq_ignore_ascii_case(s))
     }

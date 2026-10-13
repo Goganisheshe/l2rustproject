@@ -1,6 +1,10 @@
 [package]
 name = "l2survivor"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
+ue2 = { path = "../crates/ue2" }
+# bevy_gilrs (on by default) provides gamepad input through gilrs.
+bevy = "0.20"
+rand = "0.9"
