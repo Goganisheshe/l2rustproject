@@ -28,7 +28,12 @@ impl Plugin for InputPlugin {
     }
 }
 
-fn gather_input(mut input: ResMut<PlayerInput>, keys: Res<ButtonInput<KeyCode>>, gamepads: Query<&Gamepad>) {
+fn gather_input(
+    mut input: ResMut<PlayerInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+) {
     let mut dir = Vec2::ZERO;
     if keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) {
         dir.y += 1.0;
@@ -92,6 +97,11 @@ fn gather_input(mut input: ResMut<PlayerInput>, keys: Res<ButtonInput<KeyCode>>,
     }
     input.stick_latched = stick_any;
 
+    // L2_AUTOPILOT walks in a slow circle (for unattended test runs).
+    if std::env::var_os("L2_AUTOPILOT").is_some() {
+        let t = time.elapsed_secs() * 0.5;
+        dir = Vec2::new(t.cos(), t.sin());
+    }
     input.move_dir = dir.clamp_length_max(1.0);
     input.confirm = confirm;
     input.pause = pause;

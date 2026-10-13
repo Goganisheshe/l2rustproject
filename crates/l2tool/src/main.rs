@@ -9,8 +9,12 @@ fn main() -> Result<()> {
         Some("textures") => textures(&args[2], &args[3]),
         Some("scan") => scan(&args[2..]),
         Some("obj") => obj(&args[2], &args[3], &args[4]),
+        Some("materials") => materials(&args[2], &args[3], &args[4]),
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
-        _ => bail!("usage: l2tool info <pkg>... | hex <pkg> <export> [n]"),
+        _ => bail!(
+            "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
+             obj <pkg> <mesh> <out.obj> | materials <client> <pkg> <mesh> | hex <pkg> <export> [n]"
+        ),
     }
 }
 
@@ -59,6 +63,8 @@ fn scan(dirs: &[String]) -> Result<()> {
     let mut classes: std::collections::BTreeMap<String, usize> = Default::default();
     let (mut pkgs, mut bad_pkgs, mut tex_ok, mut tex_fail) = (0, 0, 0, 0);
     let (mut mesh_ok, mut mesh_fail) = (0, 0);
+    let (mut skel_ok, mut skel_fail) = (0, 0);
+    let (mut anim_ok, mut anim_fail) = (0, 0);
     let skip_tex = std::env::var_os("SCAN_NO_TEX").is_some();
     let mut versions: std::collections::BTreeMap<(u16, u16), usize> = Default::default();
     for d in dirs {
@@ -94,6 +100,33 @@ fn scan(dirs: &[String]) -> Result<()> {
                         }
                     }
                 }
+                if class == "SkeletalMesh" {
+                    match ue2::skel::read_skeletal_mesh(&pkg, i) {
+                        Ok(m) if m.indices.iter().all(|&x| (x as usize) < m.positions.len())
+                            && m.joints.iter().flatten().all(|&j| (j as usize) < m.bones.len().max(1)) && !m.indices.is_empty() => skel_ok += 1,
+                        Ok(m) => {
+                            if skel_fail < 30 { eprintln!("{}: {} inconsistent ({} verts, {} idx, {} bones)", path.display(), m.name, m.positions.len(), m.indices.len(), m.bones.len()); }
+                            skel_fail += 1;
+                        }
+                        Err(err) => {
+                            if skel_fail < 30 { eprintln!("{} [{}/{}]: {}: {err}", path.display(), pkg.version, pkg.licensee, pkg.full_name(ue2::ObjectRef::Export(i))); }
+                            skel_fail += 1;
+                        }
+                    }
+                }
+                if class == "MeshAnimation" {
+                    match ue2::anim::read_animation(&pkg, i) {
+                        Ok(a) if a.sequences.iter().all(|s| s.tracks.len() == a.bones.len()) && !a.sequences.is_empty() => anim_ok += 1,
+                        Ok(a) => {
+                            if anim_fail < 30 { eprintln!("{}: {} inconsistent ({} seqs, {} bones)", path.display(), a.name, a.sequences.len(), a.bones.len()); }
+                            anim_fail += 1;
+                        }
+                        Err(err) => {
+                            if anim_fail < 30 { eprintln!("{} [{}/{}]: {}: {err}", path.display(), pkg.version, pkg.licensee, pkg.full_name(ue2::ObjectRef::Export(i))); }
+                            anim_fail += 1;
+                        }
+                    }
+                }
                 if class == "Texture" && !skip_tex {
                     match ue2::texture::read_texture(&pkg, i) {
                         Ok(_) => tex_ok += 1,
@@ -112,6 +145,8 @@ fn scan(dirs: &[String]) -> Result<()> {
     println!("packages: {pkgs} ok, {bad_pkgs} failed; versions {versions:?}");
     println!("textures: {tex_ok} decoded, {tex_fail} failed");
     println!("static meshes: {mesh_ok} decoded, {mesh_fail} failed");
+    println!("skeletal meshes: {skel_ok} decoded, {skel_fail} failed");
+    println!("animations: {anim_ok} decoded, {anim_fail} failed");
     let mut top: Vec<_> = classes.into_iter().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1));
     for (c, n) in top.iter().take(40) {
@@ -156,5 +191,29 @@ fn obj(path: &str, name: &str, out: &str) -> Result<()> {
         }
     }
     println!("{}: {} verts, {} tris, {} sections", m.name, m.positions.len(), m.indices.len() / 3, m.sections.len());
+    Ok(())
+}
+
+/// Shows how each section material of a static mesh resolves to a texture.
+fn materials(client: &str, package: &str, mesh: &str) -> Result<()> {
+    let mut lib = ue2::library::Library::new(client)?;
+    let h = lib.find(package, mesh).with_context(|| format!("no {package}:{mesh}"))?;
+    let m = ue2::mesh::read_static_mesh(&h.package, h.export)?;
+    for (i, s) in m.sections.iter().enumerate() {
+        let full = h.package.full_name(s.material);
+        match lib.resolve(&h.package, s.material) {
+            Some(mat) => {
+                let tex = lib.diffuse_texture(&mat);
+                println!(
+                    "section {i}: {full} -> {}.{} ({}) -> {:?}",
+                    mat.package.name,
+                    mat.name(),
+                    mat.class(),
+                    tex.map(|t| (t.name, t.width, t.height, t.masked, t.alpha))
+                );
+            }
+            None => println!("section {i}: {full} -> unresolved"),
+        }
+    }
     Ok(())
 }

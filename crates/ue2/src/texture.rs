@@ -63,6 +63,9 @@ pub struct Texture {
     pub format: Format,
     /// Mip 0 as tightly packed RGBA8.
     pub rgba: Vec<u8>,
+    /// `bMasked` / `bAlphaTexture`: alpha channel is meant as opacity.
+    pub masked: bool,
+    pub alpha: bool,
 }
 
 pub fn read_texture(pkg: &Package, export: usize) -> Result<Texture, Error> {
@@ -123,7 +126,9 @@ pub fn read_texture(pkg: &Package, export: usize) -> Result<Texture, Error> {
         }
         _ => unreachable!(),
     }
-    Ok(Texture { name, width: w as u32, height: h as u32, format, rgba })
+    let flag = |n: &str| matches!(props.get(pkg, n), Some(crate::props::Value::Bool(true)));
+    let (masked, alpha) = (flag("bMasked"), flag("bAlphaTexture"));
+    Ok(Texture { name, width: w as u32, height: h as u32, format, rgba, masked, alpha })
 }
 
 /// Scans for `[i32 skip_pos][compact size][size bytes]` where skip_pos is the

@@ -16,8 +16,9 @@ use ue2::library::Library;
 const DEFAULT_CLIENT_DIR: &str = "G:/visery/l2-client";
 const DEFAULT_GROUND: &str = "ertheia_v_t:ertheia_a_ground00";
 
-/// Unreal units to Bevy meters. L2 humans are roughly 60-70 units tall.
-pub const UU_TO_M: f32 = 1.0 / 50.0;
+/// Unreal units to Bevy meters: a Lineage human is ~48 units tall, so this
+/// makes them ~1.8 m.
+pub const UU_TO_M: f32 = 1.0 / 27.0;
 
 /// Converts an Unreal position (left-handed, Z up) into Bevy space
 /// (right-handed, Y up). Swapping Y and Z mirrors the handedness, which also
@@ -108,6 +109,39 @@ impl L2Library {
         }
     }
 
+    /// Builds (and caches) a Bevy material for a UE material reference made
+    /// inside `pkg`, using its diffuse texture.
+    pub fn material(
+        &mut self,
+        pkg: &std::sync::Arc<ue2::Package>,
+        r: ue2::ObjectRef,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> Handle<StandardMaterial> {
+        let key = format!("{}:{:?}", pkg.name, r);
+        if let Some(m) = self.materials.get(&key) {
+            return m.clone();
+        }
+        let info = self.lib.as_mut().and_then(|lib| lib.resolve(pkg, r).and_then(|m| lib.material_info(&m)));
+        let mat = match info {
+            Some(m) => {
+                let (cutout, two_sided) = (m.cutout, m.cutout || m.two_sided);
+                StandardMaterial {
+                    base_color_texture: Some(images.add(to_image(m.texture, true))),
+                    alpha_mode: if cutout { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque },
+                    double_sided: two_sided,
+                    cull_mode: if two_sided { None } else { Some(bevy::render::render_resource::Face::Back) },
+                    perceptual_roughness: 0.9,
+                    ..default()
+                }
+            }
+            None => StandardMaterial::from(Color::srgb(0.6, 0.6, 0.6)),
+        };
+        let handle = materials.add(mat);
+        self.materials.insert(key, handle.clone());
+        handle
+    }
+
     /// Loads a static mesh as one Bevy mesh per section, already converted to
     /// Bevy axes and meters.
     pub fn static_mesh(
@@ -143,28 +177,7 @@ impl L2Library {
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sm.uvs.clone());
             mesh.insert_indices(Indices::U32(sm.indices[range].to_vec()));
 
-            let key = format!("{}:{:?}", h.package.name, s.material);
-            let material = match self.materials.get(&key) {
-                Some(m) => m.clone(),
-                None => {
-                    let lib = self.lib.as_mut()?;
-                    let tex = lib.resolve(&h.package, s.material).and_then(|m| lib.diffuse_texture(&m));
-                    let mat = match tex {
-                        Some(t) => StandardMaterial {
-                            base_color_texture: Some(images.add(to_image(t, true))),
-                            alpha_mode: AlphaMode::Mask(0.5),
-                            double_sided: true,
-                            cull_mode: None,
-                            perceptual_roughness: 0.9,
-                            ..default()
-                        },
-                        None => StandardMaterial::from(Color::srgb(0.6, 0.6, 0.6)),
-                    };
-                    let handle = materials.add(mat);
-                    self.materials.insert(key, handle.clone());
-                    handle
-                }
-            };
+            let material = self.material(&h.package, s.material, materials, images);
             parts.push(MeshPart { mesh: meshes.add(mesh), material });
         }
         Some(parts)

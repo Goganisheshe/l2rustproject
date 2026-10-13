@@ -8,7 +8,38 @@ use bevy::prelude::*;
 use rand::Rng;
 
 use crate::input::PlayerInput;
+use std::sync::Arc;
+
+use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
+
 use crate::l2assets::{L2Library, L2Textures};
+use crate::skinned::{spawn_model, Animated, Model, ModelCache};
+
+/// Player character: (package, skeletal mesh).
+const PLAYER_MODEL: (&str, &str) = ("lineagenpcs", "a_royal_guardA_MHuman_m00");
+
+/// Enemy roster: (package, mesh, hp multiplier, speed, unlock minute).
+const ENEMY_KINDS: &[(&str, &str, f32, f32, f32)] = &[
+    ("lineagemonsters", "gremlin_m00", 0.7, 3.0, 0.0),
+    ("lineagemonsters", "Fox_m00", 0.5, 3.8, 0.0),
+    ("lineagemonsters", "hobgoblin_m00", 1.3, 2.6, 0.5),
+    ("lineagemonsters", "orc_m00", 2.0, 2.4, 1.0),
+    ("lineagemonsters", "orc_fighter_m00", 3.0, 2.6, 2.0),
+];
+
+#[derive(Resource, Default)]
+struct Roster {
+    player: Option<Arc<Model>>,
+    enemies: Vec<(Arc<Model>, f32, f32, f32)>,
+}
+
+/// Links a gameplay entity to its animated model instance.
+#[derive(Component)]
+struct ModelLink(Entity);
+
+/// Enemy playing its death animation before being removed.
+#[derive(Component)]
+struct Dying(f32);
 
 /// Scenery scattered around the arena, straight from the client's static
 /// meshes: (package, mesh, count, min distance from start, max distance, scale).
@@ -205,6 +236,7 @@ impl Plugin for SurvivorPlugin {
                 Update,
                 (
                     move_player,
+                    animate_player,
                     spawn_enemies,
                     move_enemies,
                     fire_bolts,
@@ -213,6 +245,7 @@ impl Plugin for SurvivorPlugin {
                     collect_gems,
                     enemy_contact,
                     tick_run,
+                    dying,
                 )
                     .chain()
                     .run_if(in_state(GameState::Playing)),
@@ -234,7 +267,28 @@ fn setup_world(
     textures: Res<L2Textures>,
     mut lib: ResMut<L2Library>,
     mut images: ResMut<Assets<Image>>,
+    mut cache: ResMut<ModelCache>,
+    mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
+    // Characters from the client's skeletal meshes.
+    let mut roster = Roster::default();
+    roster.player = cache.load(
+        &mut lib,
+        PLAYER_MODEL.0,
+        PLAYER_MODEL.1,
+        None,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &mut bindposes,
+    );
+    for &(p, m, hp, speed, unlock) in ENEMY_KINDS {
+        if let Some(model) = cache.load(&mut lib, p, m, None, &mut meshes, &mut materials, &mut images, &mut bindposes) {
+            roster.enemies.push((model, hp, speed, unlock));
+        }
+    }
+    commands.insert_resource(roster);
+
     // Huge tiled ground using a texture straight from the original client.
     let ground_size = 400.0;
     let ground_mat = match &textures.ground {
@@ -323,19 +377,29 @@ fn start_run(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     old: Query<Entity, With<RunEntity>>,
+    roster: Res<Roster>,
 ) {
     for e in &old {
         commands.entity(e).despawn();
     }
     commands.insert_resource(Run::default());
+    let player = commands.spawn((Player, RunEntity, Transform::default(), Visibility::default())).id();
+    match &roster.player {
+        Some(model) => {
+            let actor = spawn_model(&mut commands, model, player, "wait_1HS");
+            commands.entity(player).insert(ModelLink(actor));
+        }
+        None => {
+            commands.spawn((
+                Mesh3d(meshes.add(Capsule3d::new(PLAYER_RADIUS, 1.0))),
+                MeshMaterial3d(materials.add(Color::srgb(0.85, 0.8, 0.6))),
+                Transform::from_xyz(0.0, 1.0, 0.0),
+                ChildOf(player),
+            ));
+        }
+    }
     commands
-        .spawn((
-            Player,
-            RunEntity,
-            Mesh3d(meshes.add(Capsule3d::new(PLAYER_RADIUS, 1.0))),
-            MeshMaterial3d(materials.add(Color::srgb(0.85, 0.8, 0.6))),
-            Transform::from_xyz(0.0, 1.0, 0.0),
-        ))
+        .entity(player)
         .with_child((
             Aura,
             Mesh3d(meshes.add(Annulus::new(0.95, 1.0))),
@@ -346,7 +410,7 @@ fn start_run(
                 unlit: true,
                 ..default()
             })),
-            Transform::from_xyz(0.0, -0.95, 0.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+            Transform::from_xyz(0.0, 0.05, 0.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             Visibility::Hidden,
         ));
 }
@@ -359,7 +423,45 @@ fn move_player(
 ) {
     // Stick/keyboard Y maps to "into the screen" (-Z).
     let d = input.move_dir;
-    player.translation += Vec3::new(d.x, 0.0, -d.y) * run.speed * time.delta_secs();
+    let dir = Vec3::new(d.x, 0.0, -d.y);
+    player.translation += dir * run.speed * time.delta_secs();
+    face(&mut player, dir);
+}
+
+/// Turns a ground entity toward `dir`. Lineage models face +X.
+fn face(t: &mut Transform, dir: Vec3) {
+    if dir.length_squared() > 1e-4 {
+        t.rotation = Quat::from_rotation_y((-dir.z).atan2(dir.x));
+    }
+}
+
+/// Picks run / idle clips for the player from movement input.
+fn animate_player(input: Res<PlayerInput>, player: Single<&ModelLink, With<Player>>, mut anims: Query<&mut Animated>) {
+    let Ok(mut anim) = anims.get_mut(player.0) else { return };
+    if input.move_dir.length() > 0.1 {
+        anim.play(&["Run_1HS", "run"], true);
+    } else {
+        anim.play(&["wait_1HS", "Wait"], true);
+    }
+}
+
+/// Plays the death clip, then removes the corpse.
+fn dying(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut corpses: Query<(Entity, &mut Dying, Option<&ModelLink>)>,
+    mut anims: Query<&mut Animated>,
+) {
+    for (e, mut d, link) in &mut corpses {
+        match link.and_then(|l| anims.get_mut(l.0).ok()) {
+            Some(mut anim) => anim.play(&["death"], false),
+            None => d.0 = d.0.min(0.0),
+        }
+        d.0 -= time.delta_secs();
+        if d.0 <= 0.0 {
+            commands.entity(e).despawn();
+        }
+    }
 }
 
 fn spawn_enemies(
@@ -367,6 +469,7 @@ fn spawn_enemies(
     time: Res<Time>,
     mut run: ResMut<Run>,
     palette: Res<Palette>,
+    roster: Res<Roster>,
     player: Single<&Transform, With<Player>>,
 ) {
     run.spawn_timer -= time.delta_secs();
@@ -378,16 +481,34 @@ fn spawn_enemies(
     run.spawn_timer = (0.8 / (1.0 + minutes * 1.5)).max(0.08);
     let batch = 1 + (minutes * 2.0) as u32;
     let mut rng = rand::rng();
+    let unlocked: Vec<_> = roster.enemies.iter().filter(|e| e.3 <= minutes).collect();
     for _ in 0..batch {
         let a = rng.random_range(0.0..TAU);
         let pos = player.translation + Vec3::new(a.cos(), 0.0, a.sin()) * SPAWN_RADIUS;
-        commands.spawn((
-            RunEntity,
-            Enemy { hp: 15.0 * (1.0 + minutes), speed: rng.random_range(2.0..3.2), damage: 8.0 },
-            Mesh3d(palette.enemy_mesh.clone()),
-            MeshMaterial3d(palette.enemy_mat.clone()),
-            Transform::from_xyz(pos.x, 0.9, pos.z),
-        ));
+        let kind = (!unlocked.is_empty()).then(|| unlocked[rng.random_range(0..unlocked.len())]);
+        let (hp_mul, speed) = kind.map(|k| (k.1, k.2)).unwrap_or((1.0, rng.random_range(2.0..3.2)));
+        let enemy = commands
+            .spawn((
+                RunEntity,
+                Enemy { hp: 15.0 * hp_mul * (1.0 + minutes), speed: speed * rng.random_range(0.9..1.1), damage: 8.0 },
+                Transform::from_xyz(pos.x, 0.0, pos.z),
+                Visibility::default(),
+            ))
+            .id();
+        match kind {
+            Some((model, ..)) => {
+                let actor = spawn_model(&mut commands, model, enemy, "run");
+                commands.entity(enemy).insert(ModelLink(actor));
+            }
+            None => {
+                commands.spawn((
+                    Mesh3d(palette.enemy_mesh.clone()),
+                    MeshMaterial3d(palette.enemy_mat.clone()),
+                    Transform::from_xyz(0.0, 0.9, 0.0),
+                    ChildOf(enemy),
+                ));
+            }
+        }
     }
 }
 
@@ -397,14 +518,16 @@ fn move_enemies(
     player: Single<&Transform, (With<Player>, Without<Enemy>)>,
     mut enemies: Query<(Entity, &Enemy, &mut Transform)>,
 ) {
-    let target = player.translation.with_y(0.9);
+    let target = player.translation.with_y(0.0);
     for (e, enemy, mut t) in &mut enemies {
         let to = target - t.translation;
         if to.length() > DESPAWN_RADIUS {
             commands.entity(e).despawn();
             continue;
         }
-        t.translation += to.normalize_or_zero() * enemy.speed * time.delta_secs();
+        let dir = to.normalize_or_zero();
+        t.translation += dir * enemy.speed * time.delta_secs();
+        face(&mut t, dir);
     }
 }
 
@@ -438,7 +561,7 @@ fn fire_bolts(
             Projectile { velocity: dir * 14.0, damage: run.bolt_damage, pierce: run.bolt_pierce, life: 1.6 },
             Mesh3d(palette.bolt_mesh.clone()),
             MeshMaterial3d(palette.bolt_mat.clone()),
-            Transform::from_translation(origin),
+            Transform::from_translation(origin + Vec3::Y * 1.0),
         ));
     }
 }
@@ -507,7 +630,7 @@ fn aura_damage(
 }
 
 fn kill(commands: &mut Commands, run: &mut Run, palette: &Palette, e: Entity, at: Vec3) {
-    commands.entity(e).despawn();
+    commands.entity(e).remove::<Enemy>().insert(Dying(1.6));
     run.kills += 1;
     commands.spawn((
         RunEntity,
@@ -582,11 +705,11 @@ fn follow_camera(
     mut cam: Single<&mut Transform, (With<Camera3d>, Without<Player>)>,
 ) {
     let Some(player) = player else { return };
-    let target = player.translation + Vec3::new(0.0, 17.0, 11.0);
+    let target = player.translation + Vec3::new(0.0, 11.0, 7.5);
     let k = 1.0 - (-8.0 * time.delta_secs()).exp();
     cam.translation = cam.translation.lerp(target, k);
     let eye = cam.translation;
-    cam.look_at(eye - Vec3::new(0.0, 17.0, 11.0), Vec3::Y);
+    cam.look_at(eye - Vec3::new(0.0, 11.0, 7.5), Vec3::Y);
 }
 
 fn update_hud(run: Res<Run>, state: Res<State<GameState>>, mut hud: Single<&mut Text, With<Hud>>) {

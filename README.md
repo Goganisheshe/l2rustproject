@@ -11,7 +11,7 @@ The original client is read-only input. By default it is expected at
 
 | Path | What |
 |------|------|
-| `crates/ue2` | Reader for the client's UE2 packages: `Lineage2Ver111/121` XOR decryption, name/import/export tables, tagged properties, texture decoding (DXT1/3/5, P8, RGBA8, L8, G16). |
+| `crates/ue2` | Reader for the client's UE2 packages: `Lineage2Ver111/121` XOR decryption, name/import/export tables, tagged properties, textures (DXT1/3/5, P8, RGBA8, L8, G16), static meshes, skeletal meshes (incl. Lineage wedges), mesh animations, cross-package material resolution (`library`). |
 | `crates/l2tool` | CLI for inspecting packages and exporting assets. |
 | `game` | The Bevy game (`l2survivor`). |
 
@@ -28,8 +28,13 @@ Environment variables:
 
 - `L2_CLIENT_DIR` — client root.
 - `L2_GROUND=<package>:<texture>` — ground texture, e.g.
-  `textures/ertheia_v_t.utx:ertheia_a_ground00` (default).
-- `L2_SCREENSHOT=<file.png>` — save a frame after 8 s and quit (for automated checks).
+  `ertheia_v_t:ertheia_a_ground00` (default).
+- `L2_MODEL=<package>:<mesh>[:<clip>]` — model viewer instead of the game,
+  e.g. `lineagemonsters:orc_m00:atk01`. `L2_VIEW_ANGLE`, `L2_VIEW_DIST`,
+  `L2_VIEW_HEIGHT` fix the camera.
+- `L2_VIEW=<package>:<static mesh>` — place one static mesh next to the start.
+- `L2_SCREENSHOT=<file.png>` — save a frame after `L2_SCREENSHOT_AT` seconds
+  (default 8) and quit. `L2_AUTOPILOT=1` walks the player in a circle.
 
 ## l2tool
 
@@ -38,6 +43,8 @@ cargo run --release -p l2tool -- info <package>...         # export table
 cargo run --release -p l2tool -- names <package>           # name table
 cargo run --release -p l2tool -- textures <package> <dir>  # all textures to PNG
 cargo run --release -p l2tool -- scan <dir>...             # open every package, decode every texture
+cargo run --release -p l2tool -- obj <package> <mesh> <out.obj> # static mesh to OBJ
+cargo run --release -p l2tool -- materials <client> <package> <mesh>
 cargo run --release -p l2tool -- hex <package> <export> [n]
 ```
 
@@ -53,3 +60,10 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   snippet) between properties and mips; the reader finds mip 0 by its
   self-describing lazy-array header instead of hard-coding each layout.
 - `systextures/l2ui_ct2.utx` uses an unknown wrapper (`FF ED FA CE`).
+- Coverage over the whole client: 1441/1442 packages, 75 434/75 434 textures,
+  15 276/15 276 static meshes, 11 489/11 517 skeletal meshes, 1 863/1 863
+  animations. The 28 skeletal meshes left keep soft-skinned geometry only in
+  `SkinningData`, which is not decoded yet.
+- Bone math: stored child-bone quaternions are conjugated relative to the
+  root (ActorX convention). Unreal→Bevy axes: (x, y, z) → (x, z, y),
+  quaternions (x, y, z, w) → (−x, −z, −y, w). 1 UU = 1/27 m.

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::props::Properties;
+use crate::props::{Properties, Value};
 use crate::texture::{read_texture, Texture};
 use crate::{Error, ObjectRef, Package, Reader};
 
@@ -105,11 +105,19 @@ impl Library {
     /// Finds the base color texture behind a material (Texture, Shader,
     /// FinalBlend, Combiner, Tex* modifiers...).
     pub fn diffuse_texture(&mut self, material: &ObjectHandle) -> Option<Texture> {
+        self.material_info(material).map(|m| m.texture)
+    }
+
+    /// Like `diffuse_texture`, plus blending hints gathered along the chain.
+    pub fn material_info(&mut self, material: &ObjectHandle) -> Option<MaterialInfo> {
         let mut cur = material.clone();
+        let (mut cutout, mut two_sided) = (false, false);
         for _ in 0..8 {
             let class = cur.class().to_ascii_lowercase();
             if class == "texture" {
-                return read_texture(&cur.package, cur.export).ok();
+                let texture = read_texture(&cur.package, cur.export).ok()?;
+                cutout |= texture.masked || texture.alpha;
+                return Some(MaterialInfo { texture, cutout, two_sided });
             }
             let field = match class.as_str() {
                 "shader" => "Diffuse",
@@ -120,9 +128,20 @@ impl Library {
             let pkg = cur.package.clone();
             let mut r = Reader::new(pkg.export_data(cur.export));
             let props = Properties::read(&pkg, &mut r).ok()?;
+            let flag = |n: &str| matches!(props.get(&pkg, n), Some(Value::Bool(true)));
+            // Shader with an opacity map, or FinalBlend with alpha test: foliage, fences...
+            cutout |= props.object(&pkg, "Opacity").is_some_and(|o| o != 0) || flag("AlphaTest");
+            two_sided |= flag("TwoSided");
             let next = props.object(&pkg, field).map(ObjectRef::from_raw)?;
             cur = self.resolve(&pkg, next)?;
         }
         None
     }
+}
+
+pub struct MaterialInfo {
+    pub texture: Texture,
+    /// Alpha channel should be treated as a cutout mask.
+    pub cutout: bool,
+    pub two_sided: bool,
 }
