@@ -1,0 +1,9 @@
+[package]
+name = "l2tool"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ue2 = { path = "../ue2" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow = "1"

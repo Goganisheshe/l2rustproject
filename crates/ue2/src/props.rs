@@ -1,0 +1,109 @@
+//! UE2 tagged property stream (the part every UObject serializes first).
+
+use crate::{Error, Package, Reader};
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Byte(u8),
+    Int(i32),
+    Bool(bool),
+    Float(f32),
+    Object(i32),
+    Name(usize),
+    Str(String),
+    /// Struct, array, vector etc. kept as raw bytes; `name` is the struct name if any.
+    Raw { kind: u8, name: Option<usize>, data: Vec<u8> },
+}
+
+#[derive(Debug, Clone)]
+pub struct Property {
+    pub name: usize,
+    pub index: u32,
+    pub value: Value,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Properties(pub Vec<Property>);
+
+impl Properties {
+    /// Reads tagged properties until the `None` terminator.
+    pub fn read(pkg: &Package, r: &mut Reader) -> Result<Self, Error> {
+        let mut out = Vec::new();
+        loop {
+            let name = r.compact()? as usize;
+            if pkg.name(name).eq_ignore_ascii_case("None") {
+                break;
+            }
+            let info = r.u8()?;
+            let kind = info & 0x0F;
+            let array_bit = info & 0x80 != 0;
+            let struct_name = if kind == 10 { Some(r.compact()? as usize) } else { None };
+            let size = match (info >> 4) & 7 {
+                0 => 1,
+                1 => 2,
+                2 => 4,
+                3 => 12,
+                4 => 16,
+                5 => r.u8()? as usize,
+                6 => r.u16()? as usize,
+                _ => r.u32()? as usize,
+            };
+            let index = if array_bit && kind != 3 {
+                let b = r.u8()? as u32;
+                if b & 0x80 == 0 {
+                    b
+                } else if b & 0xC0 == 0x80 {
+                    ((b & 0x7F) << 8) | r.u8()? as u32
+                } else {
+                    let rest = r.bytes(3)?;
+                    ((b & 0x3F) << 24) | (rest[0] as u32) << 16 | (rest[1] as u32) << 8 | rest[2] as u32
+                }
+            } else {
+                0
+            };
+            let raw = r.bytes(size)?;
+            let mut v = Reader::new(raw);
+            let value = match kind {
+                1 if size == 1 => Value::Byte(v.u8()?),
+                2 if size == 4 => Value::Int(v.i32()?),
+                3 => Value::Bool(array_bit),
+                4 if size == 4 => Value::Float(v.f32()?),
+                5 | 8 => Value::Object(v.compact()?),
+                6 => Value::Name(v.compact()? as usize),
+                13 => Value::Str(v.fstring()?),
+                _ => Value::Raw { kind, name: struct_name, data: raw.to_vec() },
+            };
+            out.push(Property { name, index, value });
+        }
+        Ok(Properties(out))
+    }
+
+    pub fn get<'a>(&'a self, pkg: &Package, name: &str) -> Option<&'a Value> {
+        self.0
+            .iter()
+            .find(|p| pkg.name(p.name).eq_ignore_ascii_case(name))
+            .map(|p| &p.value)
+    }
+
+    pub fn int(&self, pkg: &Package, name: &str) -> Option<i32> {
+        match self.get(pkg, name)? {
+            Value::Int(i) => Some(*i),
+            Value::Byte(b) => Some(*b as i32),
+            _ => None,
+        }
+    }
+
+    pub fn byte(&self, pkg: &Package, name: &str) -> Option<u8> {
+        match self.get(pkg, name)? {
+            Value::Byte(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    pub fn object(&self, pkg: &Package, name: &str) -> Option<i32> {
+        match self.get(pkg, name)? {
+            Value::Object(o) => Some(*o),
+            _ => None,
+        }
+    }
+}
