@@ -119,6 +119,36 @@ struct HudText;
 #[derive(Component)]
 struct LoadingUi;
 
+/// Click-to-move destination, as in the original client.
+#[derive(Resource, Default)]
+pub struct MoveTarget(pub Option<Vec3>);
+
+/// Ring on the ground at the click-to-move destination.
+#[derive(Component)]
+struct MoveMarker;
+
+/// Where a camera ray first meets the world: building geometry or terrain.
+pub fn ground_point(origin: Vec3, dir: Vec3, streamer: &TileStreamer, world: &CollisionWorld) -> Option<Vec3> {
+    const MAX: f32 = 300.0;
+    let solid = world.raycast(origin, dir, MAX).map(|h| origin + dir * h.t);
+    let mut terrain = None;
+    let mut t = 0.0;
+    while t < MAX {
+        let p = origin + dir * t;
+        if let Some(y) = streamer.ground_y(p) {
+            if p.y <= y {
+                terrain = Some(p.with_y(y));
+                break;
+            }
+        }
+        t += 0.5;
+    }
+    match (solid, terrain) {
+        (Some(a), Some(b)) => Some(if a.distance(origin) < b.distance(origin) { a } else { b }),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Third-person orbit camera.
 #[derive(Resource)]
 struct Orbit {
@@ -133,6 +163,7 @@ impl Plugin for MmoPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<Phase>()
             .init_resource::<Creation>()
+            .init_resource::<MoveTarget>()
             .insert_resource(Orbit { yaw: 0.0, pitch: -0.35, distance: 7.0 })
             .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.85)))
             .add_systems(Startup, setup)
@@ -142,7 +173,10 @@ impl Plugin for MmoPlugin {
             .add_systems(OnEnter(Phase::Loading), start_loading)
             .add_systems(Update, wait_loading.run_if(in_state(Phase::Loading)))
             .add_systems(OnEnter(Phase::InWorld), enter_world)
-            .add_systems(Update, (move_hero, orbit_camera, stream_around, hud).chain().run_if(in_state(Phase::InWorld)));
+            .add_systems(
+                Update,
+                (move_hero, move_marker, orbit_camera, stream_around, hud).chain().run_if(in_state(Phase::InWorld)),
+            );
     }
 }
 
@@ -285,6 +319,43 @@ pub fn settle(pos: Vec3, streamer: &TileStreamer, world: &CollisionWorld) -> f32
     }
 }
 
+/// Shows the destination ring while walking to a clicked point.
+fn move_marker(
+    mut commands: Commands,
+    time: Res<Time>,
+    target: Res<MoveTarget>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut marker: Query<(&mut Transform, &mut Visibility), With<MoveMarker>>,
+) {
+    let Ok((mut tr, mut vis)) = marker.single_mut() else {
+        commands.spawn((
+            MoveMarker,
+            Mesh3d(meshes.add(Annulus::new(0.28, 0.4))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(1.0, 0.85, 0.3, 0.8),
+                emissive: LinearRgba::rgb(1.0, 0.8, 0.2),
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            })),
+            bevy::light::NotShadowCaster,
+            Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            Visibility::Hidden,
+        ));
+        return;
+    };
+    match target.0 {
+        Some(p) => {
+            tr.translation = p + Vec3::Y * 0.05;
+            let pulse = 1.0 + 0.15 * (time.elapsed_secs() * 6.0).sin();
+            tr.scale = Vec3::splat(pulse);
+            *vis = Visibility::Visible;
+        }
+        None => *vis = Visibility::Hidden,
+    }
+}
+
 fn enter_world(
     mut commands: Commands,
     c: Res<Creation>,
@@ -313,6 +384,12 @@ fn enter_world(
         stats.hp = stats.max_hp;
         stats.mp = stats.max_mp;
     }
+    // L2_MOVE_TO="dx,dz": click-to-move that many meters away (tests).
+    if let Some(v) = std::env::var("L2_MOVE_TO").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {
+        if v.len() == 2 {
+            commands.insert_resource(MoveTarget(Some(pos + Vec3::new(v[0], 0.0, v[1]))));
+        }
+    }
     commands.entity(hero).insert((Hero { actor, class: c.index, stance: "1HS" }, stats));
     spawn_hud(&mut commands);
     commands.spawn((
@@ -324,6 +401,7 @@ fn enter_world(
 }
 
 
+#[allow(clippy::too_many_arguments)]
 fn move_hero(
     time: Res<Time>,
     input: Res<PlayerInput>,
@@ -331,25 +409,48 @@ fn move_hero(
     orbit: Res<Orbit>,
     streamer: Res<TileStreamer>,
     world: Res<CollisionWorld>,
+    mut target: ResMut<MoveTarget>,
     hero: Single<(&Hero, &mut Transform, &HeroStats)>,
     mut anims: Query<&mut Animated>,
 ) {
     let (hero, mut tr, stats) = hero.into_inner();
     if stats.hp <= 0.0 {
+        target.0 = None;
         return;
     }
-    let d = input.move_dir;
+    let mut d = input.move_dir;
     let walking = keys.pressed(KeyCode::ShiftLeft);
     // Camera-relative: stick up = away from the camera.
     let forward = Quat::from_rotation_y(orbit.yaw) * Vec3::NEG_Z;
     let right = Quat::from_rotation_y(orbit.yaw) * Vec3::X;
-    let dir = (forward * d.y + right * d.x).with_y(0.0);
-    let moving = dir.length() > 0.1;
+    let mut dir = (forward * d.y + right * d.x).with_y(0.0);
+    if dir.length() > 0.1 || stats.attacking {
+        // Keys, sticks and fights cancel a click-to-move.
+        target.0 = None;
+    } else if let Some(goal) = target.0 {
+        let to = (goal - tr.translation).with_y(0.0);
+        if to.length() < 0.2 {
+            target.0 = None;
+        } else {
+            dir = to;
+            // Arrive without overshooting the destination.
+            let speed = stats.run_speed * crate::l2assets::UU_TO_M * time.delta_secs();
+            d = Vec2::splat((to.length() / speed.max(1e-4)).min(1.0) / std::f32::consts::SQRT_2);
+        }
+    }
+    let moving = dir.length() > 0.01;
     if moving {
         let speed = if walking { WALK_SPEED } else { stats.run_speed * crate::l2assets::UU_TO_M };
         let step = dir.normalize() * speed * d.length().min(1.0) * time.delta_secs();
+        if target.0.is_some() && step.length() < 1e-4 {
+            target.0 = None;
+        }
         let moved = slide(&world, tr.translation, step);
         tr.translation += moved;
+        // Blocked by a wall: give up on the destination like the client does.
+        if target.0.is_some() && moved.length() < step.length() * 0.05 {
+            target.0 = None;
+        }
         // Lineage models face +X.
         tr.rotation = Quat::from_rotation_y((-dir.z).atan2(dir.x));
     }

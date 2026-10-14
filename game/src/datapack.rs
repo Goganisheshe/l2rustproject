@@ -107,6 +107,8 @@ pub struct Datapack {
     pub templates_by_id: HashMap<u32, PlayerTemplate>,
     /// classList.xml: class id -> (name, parent class).
     pub class_list: HashMap<u32, (String, Option<u32>)>,
+    /// Town restart points from `mapregion/` (town, position in Unreal units).
+    pub restart_points: Vec<(String, [f32; 3])>,
 }
 
 impl Datapack {
@@ -247,12 +249,13 @@ pub fn load(root: &Path) -> Datapack {
                     walk_speed: g(speed.and_then(|s| child(s, "walk")), "ground", 40.0),
                     exp: acquire.and_then(|a| attr(a, "exp")).unwrap_or(0),
                     sp: acquire.and_then(|a| attr(a, "sp")).unwrap_or(0),
-                    // `isAggressive="false"` keeps the range for helping
-                    // allies only; unspecified means aggressive.
-                    aggro_range: if child(n, "ai").and_then(|a| a.attribute("isAggressive")) == Some("false") {
-                        0.0
-                    } else {
+                    // Only `isAggressive="true"` monsters attack on sight
+                    // (Talking Island wolves and gremlins leave it out and
+                    // are passive); the range alone is for helping allies.
+                    aggro_range: if child(n, "ai").and_then(|a| a.attribute("isAggressive")) == Some("true") {
                         g(child(n, "ai"), "aggroRange", 0.0)
+                    } else {
+                        0.0
                     },
                     radius: g(collision.and_then(|c| child(c, "radius")), "normal", 10.0),
                     height: g(collision.and_then(|c| child(c, "height")), "normal", 20.0),
@@ -388,6 +391,20 @@ pub fn load(root: &Path) -> Datapack {
         let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         dp.templates_by_id.insert(t.class_id, t.clone());
         dp.classes.insert(stem, t);
+    }
+    let mut files = Vec::new();
+    xml_files(&root.join("mapregion"), &mut files);
+    for f in files {
+        let Ok(src) = std::fs::read_to_string(&f) else { continue };
+        let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
+        for region in doc.descendants().filter(|n| n.has_tag_name("region")) {
+            let town = region.attribute("town").unwrap_or("").to_string();
+            for p in region.children().filter(|c| c.has_tag_name("respawnPoint") && c.attribute("isChaotic") != Some("true")) {
+                if let (Some(x), Some(y), Some(z)) = (attr(p, "X"), attr(p, "Y"), attr(p, "Z")) {
+                    dp.restart_points.push((town.clone(), [x, y, z]));
+                }
+            }
+        }
     }
     if let Ok(src) = std::fs::read_to_string(root.join("stats/players/classList.xml")) {
         if let Ok(doc) = roxmltree::Document::parse(&src) {

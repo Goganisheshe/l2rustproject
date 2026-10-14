@@ -1,8 +1,7 @@
 # L2 Survivor
 
-Lineage II client rebuilt in Rust (Bevy), using the original client's models,
-textures and animations, with gamepad support and a Vampire Survivors style
-game loop.
+Lineage II rebuilt in Rust (Bevy) as an offline game, using the original
+client's models, textures and animations, with gamepad support.
 
 The original client is read-only input. By default it is expected at
 `G:/visery/l2-client`; override with `L2_CLIENT_DIR`.
@@ -24,9 +23,9 @@ cargo run -p l2survivor
 The default mode is the offline Lineage II (see `docs/OFFLINE_PLAN.md`):
 create a character, start in your race's village, walk the streamed world
 (tiles load in the background, 3×3 around you) with building collision.
-Movement: WASD / left stick (camera-relative), Shift walks; camera: Q/E,
-right stick or right mouse drag, wheel / triggers zoom. `L2_SURVIVOR=1`
-runs the survivors prototype described below.
+Movement as in the client: left click on the ground runs there (a ring marks
+the spot); WASD / left stick also move (camera-relative), Shift walks.
+Camera: right mouse drag, Q/E or right stick, wheel / triggers zoom.
 
 World data comes from the L2J Mobius Classic 3.0 datapack (`L2_DATAPACK`,
 default `G:/visery/l2-datapack/classic`): NPC stats and spawns, class
@@ -61,20 +60,10 @@ Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
 `L2_TALK=<npc id>` with `L2_BYPASS="cmd|cmd"`, `L2_CONTINUE=1`,
 `L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`.
 
-A run starts on the character screen: 16 race/sex/archetype combinations
-(human fighter/mystic, elf, dark elf, orc fighter/mystic, dwarf, kamael),
-each assembled from the client's face, hair and starter-armor parts and
-holding a class weapon (sword, rod, club, tomahawk or knife) on
-`Weapon_R_Bone`. Standing still, the hero turns and swings at each volley.
-
-Skills come from the client's tables: 1 673 offensive skills (661 magic for
-mystics, 1 012 physical for fighters) can be learned on level-up, each cast
-with the character's own combo animation (e.g. Wind Strike: CastMid ->
-CastEnd -> MagicShot) and its client effects (cast, flight, impact). Waves
-rotate through 683 monster kinds from `npcgrp.dat` with their textures.
-
-Controls: WASD / arrows or the left stick / D-pad to move or pick, Enter /
-Space or gamepad A to confirm, Esc or Start to pause. Attacks are automatic.
+Monsters behave like on the server: only those flagged aggressive in the
+datapack attack on sight, the rest stroll around their spawn point until
+hit. On death a window offers "To Village" (Enter / A), which restarts at
+the nearest town from `mapregion/`.
 
 Environment variables:
 
@@ -85,10 +74,8 @@ Environment variables:
   `20_21` (Dion / Cruma). WASD/left stick move, Q/E or triggers down/up,
   arrows/right stick look, Shift/A faster.
 - `L2_CLASS=<prefix>` — skip the character screen, e.g. `FElf`, `MKamael`.
-- `L2_SKILLS=<id,id,...>` — starting skills, e.g. `1177,1239`.
 - `L2_LIST_SKILLS=<file>` — write the playable skill table (id, name,
   animations, effects) and continue.
-- `L2_ZOOM=<k>` — camera distance factor (e.g. `0.35` for a close-up).
 - `L2_FONT=<ttf>` — UI font (default: Segoe UI / Arial for Cyrillic names).
 - `L2_MODEL=<package>:<mesh>[:<clip>]` — model viewer instead of the game,
   e.g. `lineagemonsters:orc_m00:atk01`; `class:<prefix>[:clip]` shows an

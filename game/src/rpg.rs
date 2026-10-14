@@ -29,6 +29,7 @@ pub struct RpgPlugin;
 impl Plugin for RpgPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcSpawner>()
+            .init_resource::<ReviveClicked>()
             .init_resource::<SpawnRequests>()
             .init_resource::<Target>()
             .init_resource::<Log>()
@@ -242,6 +243,9 @@ pub struct Npc {
     pub leader: Option<Entity>,
     /// Seconds until the next skill.
     pub skill_timer: f32,
+    /// Idle stroll around the spawn point.
+    wander: Option<Vec3>,
+    wander_timer: f32,
 }
 
 /// Bosses are balanced for parties; solo play scales their HP and attack
@@ -256,6 +260,10 @@ fn solo_scale(mut t: NpcTemplate, minion: bool) -> NpcTemplate {
     }
     t
 }
+
+/// The death window's "To Village" button was clicked.
+#[derive(Resource, Default)]
+struct ReviveClicked(bool);
 
 /// NPCs spawned by scripts (Baium waking up): id and position in Unreal units.
 #[derive(Resource, Default)]
@@ -326,6 +334,8 @@ fn spawn_at(
                 actor: None,
                 leader,
                 skill_timer: 3.0,
+                wander: None,
+                wander_timer: rand::rng().random_range(2.0..10.0),
             },
             NeedsModel,
             Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -452,6 +462,11 @@ fn pick_target(
     hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
     npcs: Query<(Entity, &Npc, &Transform), Without<Hero>>,
     mut talk: ResMut<crate::dialog::TalkRequest>,
+    mut move_to: ResMut<crate::mmo::MoveTarget>,
+    hover: Res<bevy::picking::hover::HoverMap>,
+    ui_nodes: Query<(), With<Node>>,
+    streamer: Res<crate::streaming::TileStreamer>,
+    world: Res<crate::collision::CollisionWorld>,
 ) {
     let (hero_tr, mut stats) = hero.into_inner();
     // L2_AUTOFIGHT: keep targeting and attacking the nearest monster (tests).
@@ -479,7 +494,9 @@ fn pick_target(
         target.0 = next;
         stats.attacking = false;
     }
-    if mouse.just_pressed(MouseButton::Left) {
+    // Clicks on windows and buttons belong to the UI.
+    let over_ui = hover.values().any(|m| m.keys().any(|e| ui_nodes.contains(*e)));
+    if mouse.just_pressed(MouseButton::Left) && !over_ui {
         let (cam, cam_tr) = camera.into_inner();
         let cursor = windows.iter().next().and_then(|w| w.cursor_position());
         if let Some(ray) = cursor.and_then(|c| cam.viewport_to_world(cam_tr, c).ok()) {
@@ -505,8 +522,16 @@ fn pick_target(
                         Ok((_, n, _)) if !n.template.is_monster() => talk.0 = Some(e),
                         _ => stats.attacking = true,
                     }
+                    move_to.0 = None;
                 }
                 target.0 = Some(e);
+            } else if stats.hp > 0.0 {
+                // A click on the ground walks there; the target stays selected.
+                if let Some(p) = crate::mmo::ground_point(ray.origin, *ray.direction, &streamer, &world) {
+                    move_to.0 = Some(p);
+                    stats.attacking = false;
+                    talk.0 = None;
+                }
             }
         }
     }
@@ -657,6 +682,7 @@ fn npc_ai(
                 let assist = npc.leader.is_some_and(|l| fighting.contains(&l));
                 if hero_alive && (npc.provoked || assist || (aggro > 0.0 && dist < aggro)) {
                     npc.state = NpcState::Chase;
+                    npc.wander = None;
                 }
             }
             NpcState::Chase => {
@@ -711,6 +737,31 @@ fn npc_ai(
                 }
             }
             _ => {
+                // Monsters stroll around their spawn point; bosses and
+                // their escorts hold position.
+                if npc.template.is_boss() || npc.leader.is_some() {
+                    npc.wander_timer = f32::MAX;
+                }
+                npc.wander_timer -= dt;
+                if npc.wander.is_none() && npc.wander_timer <= 0.0 {
+                    let a = rng.random_range(0.0..std::f32::consts::TAU);
+                    let r = rng.random_range(1.5..5.0);
+                    npc.wander = Some(npc.home + Vec3::new(a.cos() * r, 0.0, a.sin() * r));
+                }
+                if let Some(goal) = npc.wander {
+                    let to = (goal - tr.translation).with_y(0.0);
+                    if to.length() < 0.2 {
+                        npc.wander = None;
+                        npc.wander_timer = rng.random_range(5.0..15.0);
+                    } else {
+                        tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
+                        tr.translation += to.normalize() * (npc.template.walk_speed * UU_TO_M * dt).min(to.length());
+                        if let Some(a) = anim.as_mut() {
+                            a.play(&["Walk", "Run"], true);
+                        }
+                        continue;
+                    }
+                }
                 if let Some(a) = anim.as_mut() {
                     a.play(&["Wait"], true);
                 }
@@ -763,10 +814,21 @@ fn npc_respawn(
     }
 }
 
+#[derive(Component)]
+struct DeathWindow;
+
+/// Death as in the client: the hero lies until "To Village" (Enter / A or
+/// the button) restarts at the nearest town.
+#[allow(clippy::too_many_arguments)]
 fn hero_regen_and_death(
+    mut commands: Commands,
     time: Res<Time>,
     dp: Res<Datapack>,
+    input: Res<crate::input::PlayerInput>,
     mut log: ResMut<Log>,
+    mut streamer: ResMut<TileStreamer>,
+    mut revive: ResMut<ReviveClicked>,
+    windows: Query<Entity, With<DeathWindow>>,
     hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
     mut anims: Query<&mut Animated>,
 ) {
@@ -774,19 +836,60 @@ fn hero_regen_and_death(
     let (h, mut tr, mut stats) = hero.into_inner();
     if stats.hp <= 0.0 {
         if stats.dead_timer == 0.0 {
-            log.push("You have died. Returning to the village...");
+            log.push("You have died.");
             stats.attacking = false;
+            revive.0 = false;
+            commands
+                .spawn((
+                    DeathWindow,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Percent(40.0),
+                        top: Val::Percent(35.0),
+                        width: Val::Px(300.0),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::all(Val::Px(12.0)),
+                        row_gap: Val::Px(10.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.05, 0.04, 0.07, 0.92)),
+                ))
+                .with_children(|p| {
+                    p.spawn((Text::new("You have died."), TextFont { font_size: FontSize::Px(20.0), ..default() }));
+                    p.spawn((
+                        Node { padding: UiRect::axes(Val::Px(16.0), Val::Px(6.0)), ..default() },
+                        BackgroundColor(Color::srgba(0.35, 0.28, 0.1, 0.9)),
+                    ))
+                    .with_children(|b| {
+                        b.spawn((Text::new("To Village"), TextFont { font_size: FontSize::Px(18.0), ..default() }));
+                    })
+                    .observe(|_: On<bevy::picking::events::PointerClick>, mut flag: ResMut<ReviveClicked>| flag.0 = true);
+                });
         }
         stats.dead_timer += dt;
         if let Ok(mut a) = anims.get_mut(h.actor) {
             a.play(&["Death"], false);
         }
-        if stats.dead_timer > 4.0 {
+        let auto = std::env::var_os("L2_AUTOFIGHT").is_some() && stats.dead_timer > 4.0;
+        if (input.confirm || auto || revive.0) && stats.dead_timer > 0.5 {
+            revive.0 = false;
             stats.dead_timer = 0.0;
             stats.hp = stats.max_hp * 0.7;
             stats.mp = stats.max_mp * 0.7;
-            tr.translation = stats.respawn;
-            let _ = &dp;
+            // Nearest town restart point, else where the hero started.
+            let here = crate::streaming::bevy_to_ue(tr.translation);
+            let d2 = |p: &[f32; 3]| (p[0] - here[0]).powi(2) + (p[1] - here[1]).powi(2);
+            let town = dp.restart_points.iter().min_by(|a, b| d2(&a.1).total_cmp(&d2(&b.1)));
+            let pos = town.map_or(stats.respawn, |(_, p)| ue_to_bevy(*p));
+            tr.translation = pos;
+            streamer.request_around(pos);
+            if let Some((name, _)) = town {
+                log.push(format!("You have been returned to {name}."));
+            }
+            for e in &windows {
+                commands.entity(e).despawn();
+            }
         }
         return;
     }
