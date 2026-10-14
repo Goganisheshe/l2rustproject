@@ -308,21 +308,55 @@ pub fn give_starting_items(
     commands.entity(e).insert(inv);
 }
 
-/// Feeds equipped item stats into the hero's stats when equipment changes.
+/// Template P.Def / M.Def slots an item's defence replaces.
+fn defence_slots(bodypart: &str) -> &'static [&'static str] {
+    match bodypart {
+        "chest" => &["chest"],
+        "legs" => &["legs"],
+        "alldress" | "onepiece" => &["chest", "legs"],
+        "head" => &["head"],
+        "feet" => &["feet"],
+        "gloves" => &["gloves"],
+        "underwear" => &["underwear"],
+        "back" => &["cloak"],
+        "neck" => &["neck"],
+        "rear;lear" => &["rear"],
+        "rfinger;lfinger" => &["rfinger"],
+        _ => &[],
+    }
+}
+
+/// Feeds equipped item stats into the hero's stat formulas when equipment changes.
 fn apply_equipment(data: Res<ItemData>, hero: Single<(&Inventory, &mut HeroStats), (With<Hero>, Changed<Inventory>)>) {
     let (inv, mut stats) = hero.into_inner();
-    let (mut patk, mut matk, mut pdef, mut mdef, mut spd) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut e = crate::rpg::Equipment::default();
     for item in inv.equipped.values() {
         let Some(t) = data.items.get(item) else { continue };
-        patk += t.stat("pAtk");
-        matk += t.stat("mAtk");
-        pdef += t.stat("pDef");
-        mdef += t.stat("mDef");
         if t.kind == "Weapon" {
-            spd = t.stat("pAtkSpd");
+            e.weapon = t.stats.clone();
+            continue;
         }
+        let slots = defence_slots(&t.bodypart);
+        // A full armor's defence counts once, in its first slot; the rest
+        // of the covered slots drop their base.
+        for (i, slot) in slots.iter().enumerate() {
+            let pdef = if i == 0 { t.stat("pDef") } else { 0.0 };
+            let mdef = if i == 0 { t.stat("mDef") } else { 0.0 };
+            if t.stats.contains_key("pDef") || slots.len() > 1 {
+                e.armor_pdef.insert(slot.to_string(), pdef);
+            }
+            if t.stats.contains_key("mDef") {
+                e.jewel_mdef.insert(slot.to_string(), mdef);
+            }
+        }
+        // Shields (lhand) add their P.Def on top.
+        if t.bodypart == "lhand" {
+            *e.armor_pdef.entry("shield".into()).or_default() += t.stat("pDef");
+        }
+        e.evasion += t.stat("rEvas");
+        e.max_mp += t.stat("maxMp");
     }
-    stats.equip = crate::rpg::Equipment { patk, matk, pdef, mdef, atk_speed: spd };
+    stats.equip = e;
     stats.recalc();
 }
 

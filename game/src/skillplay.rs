@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use rand::Rng;
+
 
 use crate::datapack::{Datapack, ServerSkill, SkillBook};
 use crate::effects::{spawn_effect, EffectCache};
@@ -107,6 +107,7 @@ fn cast_input(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     book: Res<SkillBook>,
+    data: Res<GameData>,
     target: Res<Target>,
     mut log: ResMut<Log>,
     hero: Single<(&mut HeroStats, &mut HeroSkills, &Transform), With<Hero>>,
@@ -179,7 +180,10 @@ fn cast_input(
     };
     stats.mp -= mp;
     stats.attacking = false;
-    let total = def.hit_time.clamp(0.4, 4.0);
+    // Cast time scales with casting speed (magic) or attack speed.
+    let magic = data.visuals.get(&id).is_some_and(|v| v.magic);
+    let speed = if magic { stats.matk_speed / 333.0 } else { stats.patk_speed / 300.0 };
+    let total = (def.hit_time / speed.max(0.1)).clamp(0.3, 4.0);
     skills.cast = Some(Cast { skill: id, level, target: tgt, time: 0.0, total, stage: usize::MAX, fired: false });
 }
 
@@ -286,11 +290,9 @@ fn apply_effects(
             "PhysicalDamage" | "MagicalDamage" => {
                 let Some((mut npc, _)) = target.and_then(|t| npcs.get_mut(t).ok()) else { continue };
                 let dmg = if e.name == "PhysicalDamage" {
-                    let (d, _) = crate::rpg::damage((stats.patk + power) * shot, npc.template.pdef, &mut rng);
-                    d
+                    crate::formulas::physical(&stats.combat(), &npc.template.combat(), power, shot, true, &mut rng).map_or(0.0, |d| d.0)
                 } else {
-                    // Lineage magic: 91 * sqrt(M.Atk) * power / M.Def.
-                    91.0 * stats.matk.max(1.0).sqrt() * power / npc.template.mdef.max(1.0) * rng.random_range(0.9..1.1) * shot
+                    crate::formulas::magical(&stats.combat(), &npc.template.combat(), power, shot, &mut rng)
                 };
                 npc.hp -= dmg;
                 npc.provoked = true;

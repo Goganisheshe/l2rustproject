@@ -9,7 +9,7 @@ use crate::effects::{spawn_effect, EffectCache};
 use crate::gamedata::GameData;
 use crate::l2assets::{L2Library, UU_TO_M};
 use crate::mmo::{Hero, Phase};
-use crate::rpg::{damage, HeroStats, Log, Npc, NpcState};
+use crate::rpg::{HeroStats, Log, Npc, NpcState};
 use crate::skinned::Animated;
 
 pub struct NpcSkillsPlugin;
@@ -72,9 +72,9 @@ fn npc_skills(
         for e in &def.effects {
             let power = e.power.at(level);
             let dmg = match e.name.as_str() {
-                "PhysicalDamage" => damage(npc.template.patk + power, stats.pdef, &mut rng).0,
+                "PhysicalDamage" => crate::formulas::physical(&npc.template.combat(), &stats.combat(), power, 1.0, true, &mut rng).map_or(0.0, |d| d.0),
                 "MagicalDamage" | "MagicalAttackMp" | "HpDrain" => {
-                    91.0 * npc.template.matk.max(1.0).sqrt() * power / stats.mdef.max(1.0) * rng.random_range(0.9..1.1)
+                    crate::formulas::magical(&npc.template.combat(), &stats.combat(), power, 1.0, &mut rng)
                 }
                 _ => 0.0,
             };

@@ -39,9 +39,28 @@ pub struct NpcTemplate {
     pub skills: Vec<(u32, u32)>,
     /// Escort spawned with the NPC: (npc id, count).
     pub minions: Vec<(u32, u32)>,
+    /// Final combat values (stat bonuses and level applied at load).
+    pub accuracy: f32,
+    pub evasion: f32,
+    /// Critical rate, per mille.
+    pub crit: f32,
+    /// Damage spread, percent.
+    pub random: f32,
 }
 
 impl NpcTemplate {
+    pub fn combat(&self) -> crate::formulas::Combat {
+        crate::formulas::Combat {
+            patk: self.patk,
+            pdef: self.pdef,
+            matk: self.matk,
+            mdef: self.mdef,
+            accuracy: self.accuracy,
+            evasion: self.evasion,
+            crit: self.crit,
+            random: self.random,
+        }
+    }
     pub fn is_boss(&self) -> bool {
         matches!(self.kind.as_str(), "RaidBoss" | "GrandBoss")
     }
@@ -87,6 +106,12 @@ pub struct PlayerTemplate {
     pub mdef: f32,
     pub patk_speed: f32,
     pub matk_speed: f32,
+    /// Base P.Def / M.Def per equipment slot (chest, legs... / neck, rear...).
+    pub pdef_slots: Vec<(String, f32)>,
+    pub mdef_slots: Vec<(String, f32)>,
+    /// Unarmed critical rate and damage spread.
+    pub crit: f32,
+    pub rnd_dmg: f32,
     pub atk_range: f32,
     pub run_speed: f32,
     pub walk_speed: f32,
@@ -212,6 +237,7 @@ fn text<T: std::str::FromStr>(n: roxmltree::Node, name: &str) -> Option<T> {
 
 pub fn load(root: &Path) -> Datapack {
     let mut dp = Datapack::default();
+    crate::formulas::load_bonus(root);
 
     // NPC templates.
     let mut files = Vec::new();
@@ -229,21 +255,33 @@ pub fn load(root: &Path) -> Datapack {
             let g = |n: Option<roxmltree::Node>, a: &str, d: f32| n.and_then(|n| attr::<f32>(n, a)).unwrap_or(d);
             let acquire = child(n, "acquire");
             let collision = child(n, "collision");
+            // Stat functions as on the server: P.Atk * STR * level mod,
+            // M.Atk * INT^2 * level mod^2, M.Def * MEN, speed and crit * DEX.
+            use crate::formulas as f;
+            let level: u32 = attr(n, "level").unwrap_or(1);
+            let lm = f::level_mod(level);
+            let st = |a: &str, d: f32| stats.and_then(|s| attr::<f32>(s, a)).unwrap_or(d);
+            let (s_str, s_int, s_dex, s_men) = (st("str", 40.0), st("int", 21.0), st("dex", 30.0), st("men", 20.0));
+            let int_b = f::int_bonus(s_int);
             dp.npcs.insert(
                 id,
                 NpcTemplate {
                     id,
-                    level: attr(n, "level").unwrap_or(1),
+                    level,
                     kind: n.attribute("type").unwrap_or("Folk").to_string(),
                     name: n.attribute("name").unwrap_or("").to_string(),
                     title: n.attribute("title").unwrap_or("").to_string(),
                     hp: g(vitals, "hp", 100.0),
                     mp: g(vitals, "mp", 50.0),
-                    patk: g(attack, "physical", 10.0),
-                    matk: g(attack, "magical", 10.0),
-                    pdef: g(defence, "physical", 40.0),
-                    mdef: g(defence, "magical", 30.0),
-                    atk_speed: g(attack, "attackSpeed", 253.0),
+                    patk: g(attack, "physical", 10.0) * f::str_bonus(s_str) * lm,
+                    matk: g(attack, "magical", 10.0) * int_b * int_b * lm * lm,
+                    pdef: g(defence, "physical", 40.0) * lm,
+                    mdef: g(defence, "magical", 30.0) * f::men_bonus(s_men) * lm,
+                    atk_speed: g(attack, "attackSpeed", 253.0) * f::dex_bonus(s_dex),
+                    accuracy: f::dex_accuracy(s_dex, level) + g(attack, "accuracy", 0.0),
+                    evasion: f::dex_accuracy(s_dex, level) + g(defence, "evasion", 0.0),
+                    crit: g(attack, "critical", 4.0) * f::dex_bonus(s_dex) * 10.0,
+                    random: g(attack, "random", 10.0),
                     atk_range: g(attack, "range", 40.0),
                     run_speed: g(speed.and_then(|s| child(s, "run")), "ground", 80.0),
                     walk_speed: g(speed.and_then(|s| child(s, "walk")), "ground", 40.0),
@@ -351,6 +389,16 @@ pub fn load(root: &Path) -> Datapack {
         let sum = |name: &str| -> f32 {
             child(sd, name).map(|n| n.children().filter_map(|c| c.text()?.trim().parse::<f32>().ok()).sum()).unwrap_or(0.0)
         };
+        let slots = |name: &str| -> Vec<(String, f32)> {
+            child(sd, name)
+                .map(|n| {
+                    n.children()
+                        .filter(|c| c.is_element())
+                        .filter_map(|c| Some((c.tag_name().name().to_string(), c.text()?.trim().parse::<f32>().ok()?)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         let mut t = PlayerTemplate {
             class_id: text(r, "classId").unwrap_or(0),
             str_: text(sd, "baseSTR").unwrap_or(40.0),
@@ -364,6 +412,10 @@ pub fn load(root: &Path) -> Datapack {
             pdef: sum("basePDef"),
             mdef: sum("baseMDef"),
             patk_speed: text(sd, "basePAtkSpd").unwrap_or(300.0),
+            pdef_slots: slots("basePDef"),
+            mdef_slots: slots("baseMDef"),
+            crit: text(sd, "baseCritRate").unwrap_or(4.0),
+            rnd_dmg: text(sd, "baseRndDam").unwrap_or(10.0),
             matk_speed: text(sd, "baseMAtkSpd").unwrap_or(333.0),
             atk_range: text(sd, "baseAtkRange").unwrap_or(20.0),
             run_speed: child(sd, "baseMoveSpd").and_then(|m| text(m, "run")).unwrap_or(120.0),

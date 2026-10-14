@@ -73,6 +73,14 @@ pub struct HeroStats {
     pub pdef: f32,
     pub matk: f32,
     pub mdef: f32,
+    pub accuracy: f32,
+    pub evasion: f32,
+    /// Critical rate, per mille.
+    pub crit: f32,
+    /// Weapon damage spread, percent.
+    pub random: f32,
+    pub patk_speed: f32,
+    pub matk_speed: f32,
     /// Run speed in Unreal units per second (buffs change it).
     pub run_speed: f32,
     pub atk_interval: f32,
@@ -92,15 +100,19 @@ pub struct HeroStats {
     pub equip: Equipment,
 }
 
-/// Sum of equipped item stats.
+/// Equipped item stats, sorted for the stat formulas.
 #[derive(Clone, Debug, Default)]
 pub struct Equipment {
-    pub patk: f32,
-    pub matk: f32,
-    pub pdef: f32,
-    pub mdef: f32,
-    /// Weapon attack speed (0 = unarmed, use the class base).
-    pub atk_speed: f32,
+    /// Weapon stats (pAtk, mAtk, pAtkSpd, critRate, randomDamage,
+    /// accCombat, pAtkRange); empty when unarmed.
+    pub weapon: HashMap<String, f32>,
+    /// P.Def of armor by the template slot it replaces (chest, legs...).
+    pub armor_pdef: HashMap<String, f32>,
+    /// M.Def of jewels by template slot (neck, rear, rfinger...).
+    pub jewel_mdef: HashMap<String, f32>,
+    /// Evasion from armor and shields.
+    pub evasion: f32,
+    pub max_mp: f32,
 }
 
 /// A timed stat modifier from a skill effect (PhysicalAttack, Speed...).
@@ -130,6 +142,12 @@ impl HeroStats {
             pdef: 0.0,
             matk: 0.0,
             mdef: 0.0,
+            accuracy: 0.0,
+            evasion: 0.0,
+            crit: 0.0,
+            random: 10.0,
+            patk_speed: 300.0,
+            matk_speed: 333.0,
             run_speed: 120.0,
             atk_interval: 1.0,
             atk_range: 1.5,
@@ -149,25 +167,49 @@ impl HeroStats {
         s
     }
 
-    /// Recomputes derived stats for the current level.
+    pub fn combat(&self) -> crate::formulas::Combat {
+        crate::formulas::Combat {
+            patk: self.patk,
+            pdef: self.pdef,
+            matk: self.matk,
+            mdef: self.mdef,
+            accuracy: self.accuracy,
+            evasion: self.evasion,
+            crit: self.crit,
+            random: self.random,
+        }
+    }
+
+    /// Recomputes derived stats with the server's stat functions.
     pub fn recalc(&mut self) {
+        use crate::formulas as f;
         let t = &self.template;
-        let lvl_mod = (self.level as f32 + 89.0) / 100.0;
+        let lm = f::level_mod(self.level);
         let gain = t.levels.get(self.level as usize - 1).or(t.levels.last()).cloned().unwrap_or_default();
-        let str_bonus = 1.0 + (t.str_ - 40.0) * 0.02;
-        let con_bonus = 1.0 + (t.con - 40.0) * 0.02;
-        self.max_hp = gain.hp * con_bonus.max(0.5);
-        self.max_mp = gain.mp;
-        self.hp_regen = gain.hp_regen;
-        self.mp_regen = gain.mp_regen;
+        let (con, men) = (f::con_bonus(t.con), f::men_bonus(t.men));
+        self.max_hp = gain.hp * con;
+        self.max_mp = gain.mp * men + self.equip.max_mp;
+        self.hp_regen = gain.hp_regen * con;
+        self.mp_regen = gain.mp_regen * men;
         let e = &self.equip;
-        self.patk = (t.patk + e.patk) * str_bonus.max(0.5) * lvl_mod;
-        self.pdef = (t.pdef + e.pdef) * lvl_mod;
-        let int_bonus = 1.0 + (t.int - 40.0) * 0.02;
-        self.matk = (t.matk + e.matk) * int_bonus.max(0.5) * lvl_mod * lvl_mod;
-        self.mdef = (t.mdef + e.mdef) * lvl_mod;
+        let w = |k: &str| e.weapon.get(k).copied();
+        let int_b = f::int_bonus(t.int);
+        self.patk = w("pAtk").unwrap_or(t.patk) * f::str_bonus(t.str_) * lm;
+        self.matk = w("mAtk").unwrap_or(t.matk) * int_b * int_b * lm * lm;
+        // Armor replaces the bare slot's base defence.
+        let pdef: f32 = t.pdef_slots.iter().map(|(slot, base)| e.armor_pdef.get(slot).copied().unwrap_or(*base)).sum::<f32>()
+            + e.armor_pdef.get("shield").copied().unwrap_or(0.0);
+        let mdef: f32 = t.mdef_slots.iter().map(|(slot, base)| e.jewel_mdef.get(slot).copied().unwrap_or(*base)).sum();
+        self.pdef = pdef * lm;
+        self.mdef = mdef * men * lm;
+        let dex = f::dex_bonus(t.dex);
+        self.accuracy = f::dex_accuracy(t.dex, self.level) + w("accCombat").unwrap_or(0.0);
+        self.evasion = f::dex_accuracy(t.dex, self.level) + e.evasion;
+        self.crit = w("critRate").unwrap_or(t.crit) * dex * 10.0;
+        self.random = w("randomDamage").unwrap_or(t.rnd_dmg);
         self.run_speed = t.run_speed;
-        let mut atk_speed = if e.atk_speed > 0.0 { e.atk_speed } else { t.patk_speed };
+        let mut atk_speed = w("pAtkSpd").unwrap_or(t.patk_speed) * dex;
+        let mut cast_speed = t.matk_speed * f::wit_bonus(t.wit);
         for b in &self.buffs {
             let apply = |v: &mut f32| {
                 if b.percent {
@@ -183,13 +225,20 @@ impl HeroStats {
                 "MagicalDefence" => apply(&mut self.mdef),
                 "Speed" => apply(&mut self.run_speed),
                 "PhysicalAttackSpeed" => apply(&mut atk_speed),
+                "MagicalAttackSpeed" => apply(&mut cast_speed),
+                "Accuracy" => apply(&mut self.accuracy),
+                "PhysicalEvasion" => apply(&mut self.evasion),
+                "CriticalRate" => apply(&mut self.crit),
                 "MaxHp" => apply(&mut self.max_hp),
                 "MaxMp" => apply(&mut self.max_mp),
                 _ => {}
             }
         }
-        self.atk_interval = 500.0 / atk_speed.max(1.0) * 0.6;
-        self.atk_range = (t.atk_range.max(40.0) + 30.0) * UU_TO_M;
+        self.patk_speed = atk_speed;
+        self.matk_speed = cast_speed;
+        // 500 000 / attack speed milliseconds between hits.
+        self.atk_interval = 500.0 / atk_speed.max(1.0);
+        self.atk_range = (w("pAtkRange").unwrap_or(t.atk_range).max(40.0) + 30.0) * UU_TO_M;
         self.hp = self.hp.min(self.max_hp);
         self.mp = self.mp.min(self.max_mp);
     }
@@ -554,12 +603,6 @@ pub fn pick_target(
     }
 }
 
-pub fn damage(patk: f32, pdef: f32, rng: &mut impl Rng) -> (f32, bool) {
-    let crit = rng.random_bool(0.08);
-    let base = 70.0 * patk / pdef.max(1.0) * rng.random_range(0.9..1.1);
-    (if crit { base * 2.0 } else { base }.max(1.0), crit)
-}
-
 /// Runs to the target and auto-attacks it, awarding experience on kills.
 #[allow(clippy::too_many_arguments)]
 fn hero_attack(
@@ -621,7 +664,10 @@ fn hero_attack(
     }
     let mut rng = rand::rng();
     let ss = inv.map_or(1.0, |mut i| crate::items::use_shot(&mut i, &items, false));
-    let (dmg, crit) = damage(stats.patk * ss, npc.template.pdef, &mut rng);
+    let Some((dmg, crit)) = crate::formulas::physical(&stats.combat(), &npc.template.combat(), 0.0, ss, false, &mut rng) else {
+        log.push("You missed.");
+        return;
+    };
     npc.hp -= dmg;
     npc.provoked = true;
     log.push(format!("You hit {} for {:.0}{}", npc.template.name, dmg, if crit { " (critical)" } else { "" }));
@@ -723,7 +769,12 @@ fn npc_ai(
                         if let Some(a) = anim.as_mut() {
                             a.restart(&["atk01", "Atk01"], false);
                         }
-                        let (dmg, crit) = damage(npc.template.patk, stats.pdef, &mut rng);
+                        let Some((dmg, crit)) =
+                            crate::formulas::physical(&npc.template.combat(), &stats.combat(), 0.0, 1.0, false, &mut rng)
+                        else {
+                            log.push(format!("{} misses you.", npc.template.name));
+                            continue;
+                        };
                         stats.hp -= dmg;
                         log.push(format!("{} hits you for {:.0}{}", npc.template.name, dmg, if crit { " (critical)" } else { "" }));
                     } else if let Some(a) = anim.as_mut() {

@@ -45,7 +45,14 @@ teleports and the quest pages. What is playable:
   equips or uses; on soulshots / spiritshots it toggles auto-use, which
   doubles attack or spell damage per shot; the Classic universal shots fit
   any weapon grade).
-- V sits down / stands up: 1.5x HP/MP regeneration. Equipped armor and weapons
+- V sits down / stands up: 1.5x HP/MP regeneration.
+- Formulas follow L2J (`game/src/formulas.rs`): stat bonuses from
+  `stats/statBonus.xml` and the level modifier for P.Atk (STR), M.Atk (INT²),
+  M.Def (MEN), HP / MP (CON / MEN), attack speed and critical rate (DEX),
+  casting speed (WIT); armor replaces the bare slot's base defence;
+  accuracy vs evasion decides misses; weapon random damage, x2 criticals.
+  Monsters get the same functions from their datapack stats. Alt+T shows the
+  status window (`L2_STATUS=1`). Equipped armor and weapons
   change the hero's model (client `armorgrp` / `weapongrp`), weapons switch
   the animation stance. Scrolls of escape / teleport and potions work.
 - NPCs: F / X or a second click on a friendly NPC walks up and opens its
