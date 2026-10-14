@@ -24,17 +24,17 @@ use crate::streaming::{bevy_to_ue, tile_of, ue_to_bevy, TileStreamer};
 const RUN_SPEED: f32 = 120.0 / 27.0;
 const WALK_SPEED: f32 = 60.0 / 27.0;
 
-/// Starting point. The datapack's creation points are the remade Talking
-/// Island, but this client ships the classic island geometry (16_25.unr is
-/// identical to 16_25_Classic.unr), so everyone starts in a village whose
-/// geometry matches the datapack spawns.
-fn start_location(class: &CharClass, _dp: &Datapack) -> [f32; 3] {
-    // L2_START="x,y,z" overrides (Unreal units), e.g. a hunting ground for tests.
+/// Starting point: the class template's creation point from the datapack,
+/// else the race's newbie village. `L2_START="x,y,z"` overrides.
+fn start_location(class: &CharClass, dp: &Datapack) -> [f32; 3] {
     if let Some(p) = std::env::var("L2_START").ok().and_then(|s| {
         let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         (v.len() == 3).then(|| [v[0], v[1], v[2]])
     }) {
         return p;
+    }
+    if let Some(p) = dp.classes.get(template_for(class.prefix)).and_then(|t| t.creation_points.first()) {
+        return *p;
     }
     race_village(class)
 }
@@ -53,7 +53,7 @@ fn race_village(class: &CharClass) -> [f32; 3] {
     } else if p.contains("Kamael") {
         [-125464.0, 37776.0, 1176.0] // Kamael Village
     } else {
-        [-80826.0, 149775.0, -3043.0] // Gludin Village
+        [-71338.0, 258271.0, -3104.0] // Talking Island Village
     }
 }
 

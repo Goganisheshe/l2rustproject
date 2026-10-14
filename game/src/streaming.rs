@@ -211,7 +211,8 @@ fn prepare_tile(
         meshes: Vec::new(),
         placements: Vec::new(),
     };
-    let Some(pkg) = lib.package(name) else { return out };
+    // The Classic world: prefer `X_Y_Classic.unr` where the client has one.
+    let Some(pkg) = lib.package(&format!("{name}_Classic")).or_else(|| lib.package(name)) else { return out };
     let Ok(tile) = read_map(&pkg) else { return out };
     if let Some(t) = tile.terrains.first() {
         out.terrain = prepare_terrain(lib, &pkg, t);

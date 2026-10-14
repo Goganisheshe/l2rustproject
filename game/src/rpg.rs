@@ -138,8 +138,7 @@ pub fn template_for(prefix: &str) -> &'static str {
         "MOrc" | "FOrc" => "OrcFighter",
         "MShaman" | "FShaman" => "OrcMystic",
         "MDwarf" | "FDwarf" => "DwarvenFighter",
-        "MKamael" => "KamaelMaleSoldier",
-        "FKamael" => "KamaelFemaleSoldier",
+        "MKamael" | "FKamael" => "KamaelSoldier",
         _ => "HumanFighter",
     }
 }

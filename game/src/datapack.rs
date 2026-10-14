@@ -1,5 +1,5 @@
-//! Server-side game data, imported from the L2J Mobius datapack of the same
-//! chronicle (Salvation): NPC templates, spawns, player class templates and
+//! Server-side game data, imported from the L2J Mobius Classic datapack
+//! (Classic 3.0 The Kamael), whose world matches this client's map tiles: NPC templates, spawns, player class templates and
 //! the experience table. Point `L2_DATAPACK` at its `dist/game/data` folder.
 
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use rand::Rng;
 
-const DEFAULT_DATAPACK: &str = "G:/visery/l2-datapack/salvation";
+const DEFAULT_DATAPACK: &str = "G:/visery/l2-datapack/classic";
 
 #[derive(Debug, Clone)]
 pub struct NpcTemplate {
@@ -259,6 +259,7 @@ pub fn load(root: &Path) -> Datapack {
     // Starting class templates.
     let mut files = Vec::new();
     xml_files(&root.join("stats/players/templates/StartingClass"), &mut files);
+    files.push(root.join("stats/players/templates/Kamael/KamaelSoldier.xml"));
     for f in files {
         let Ok(src) = std::fs::read_to_string(&f) else { continue };
         let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
