@@ -143,6 +143,22 @@ impl Dialog {
 #[derive(Component)]
 struct DialogRoot;
 
+/// The NPC dialog frame's header shows who is talking.
+fn dialog_title(
+    dialog: Res<Dialog>,
+    roots: Query<&crate::l2ui::UiWindow>,
+    mut titles: Query<(&mut Text, &ChildOf), With<crate::l2ui::WindowTitle>>,
+) {
+    for (mut t, parent) in &mut titles {
+        if roots.get(parent.parent()).is_ok_and(|w| w.0 == "NPCDialogWnd") {
+            let name = if dialog.tutorial { "Tutorial" } else { dialog.npc_name.as_str() };
+            if t.0 != name {
+                t.0 = name.to_string();
+            }
+        }
+    }
+}
+
 #[derive(Component)]
 struct DialogLink(usize);
 
@@ -168,6 +184,7 @@ impl Plugin for DialogPlugin {
             .init_resource::<ScreenMsg>()
             .init_resource::<QuestLog>()
             .insert_resource(Quests(crate::quests::all()))
+            .add_systems(Update, dialog_title)
             .add_systems(PreStartup, |mut commands: Commands| commands.insert_resource(Pages::load(&datapack_root())))
             .add_systems(OnEnter(Phase::InWorld), spawn_overlays)
             .add_systems(

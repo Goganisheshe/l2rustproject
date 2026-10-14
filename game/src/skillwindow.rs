@@ -24,6 +24,10 @@ struct SkillUi {
 #[derive(Component)]
 struct SkillRoot;
 
+/// Line under the client's skill window: SP, or the skill under the cursor.
+#[derive(Component)]
+struct SkillInfo;
+
 /// One line of the window.
 enum Row {
     Learn(TreeEntry),
@@ -104,6 +108,8 @@ fn skill_window(
     mut log: ResMut<Log>,
     hero: Single<(&mut HeroStats, Option<&mut Inventory>, Option<&mut HeroSkills>), With<Hero>>,
     roots: Query<Entity, With<SkillRoot>>,
+    ua: crate::l2ui::UiAssets,
+    mut icons: Local<std::collections::HashMap<String, Option<Handle<Image>>>>,
 ) {
     let toggle = keys.just_pressed(KeyCode::KeyK) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::RightThumb));
     if toggle {
@@ -171,6 +177,93 @@ fn skill_window(
     let list = rows(&tree, &skills, stats.level);
     let selected = ui.selected;
     let name = |id: u32| book.skills.get(&id).map_or(format!("skill {id}"), |s| s.name.clone());
+    let screen = ua.screen();
+    let crate::l2ui::UiAssets { iface, mut tex, mut lib, mut images, .. } = ua;
+    if let Some(iface) = iface.as_deref() {
+        let hide = |n: &str| matches!(n, "ASkill" | "PSkill" | "SkillTrain" | "TabCtrl" | "DrawerWnd_Effect" | "ResearchButton" | "TexTabBgLine") || n.starts_with("TexTabLight");
+        let Some(root) = crate::l2ui::spawn_window(&mut commands, iface, &iface.0, "MagicSkillWnd", screen, &hide, &mut tex, &mut lib, &mut images) else { return };
+        commands.entity(root).insert(SkillRoot);
+        let mut icon = |id: u32| {
+            let file = book.skills.get(&id).map(|s| s.icon.clone()).unwrap_or_default();
+            icons
+                .entry(file.clone())
+                .or_insert_with(|| {
+                    let (pkg, obj) = file.split_once('.')?;
+                    lib.texture(pkg, obj, false).map(|img| images.add(img))
+                })
+                .clone()
+        };
+        let mut sections: [(&str, Vec<(usize, u32, String, bool)>); 4] = Default::default();
+        sections[0].0 = "Активные умения";
+        sections[1].0 = "Пассивные умения";
+        sections[2].0 = "Можно изучить";
+        sections[3].0 = "Будут доступны позже";
+        for (i, row) in list.iter().enumerate() {
+            let (sec, id, info, dim) = match row {
+                Row::Known(id, lv) => {
+                    let active = book.skills.get(id).is_some_and(|s| s.is_active());
+                    let bar = if skills.hotbar.contains(id) { ", на панели" } else { "" };
+                    (if active { 0 } else { 1 }, *id, format!("{} ур. {lv}{bar}", name(*id)), false)
+                }
+                Row::Learn(e) => {
+                    let extra: String = e.items.iter().map(|(id, n)| format!(" + {} x{n}", items.items.get(id).map_or(id.to_string(), |t| t.name.clone()))).collect();
+                    (2, e.skill, format!("Изучить {} ур. {}: {} SP{extra}", name(e.skill), e.level, e.sp), false)
+                }
+                Row::Later(e) => (3, e.skill, format!("{} ур. {} (с {} уровня)", name(e.skill), e.level, e.get_level), true),
+            };
+            sections[sec].1.push((i, id, info, dim));
+        }
+        let (pos, size) = crate::l2ui::ctrl_rect(&iface.0, "MagicSkillWnd", "Texgroupbox", screen).unwrap_or((Vec2::new(6.0, 58.0), Vec2::new(287.0, 411.0)));
+        let sp = stats.sp;
+        commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(pos.x + 8.0),
+                    top: Val::Px(pos.y + 6.0),
+                    width: Val::Px(size.x - 16.0),
+                    height: Val::Px(size.y - 12.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(4.0),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                ChildOf(root),
+            ))
+            .with_children(|p| {
+                for (title, cells) in sections.iter().filter(|s| !s.1.is_empty()) {
+                    p.spawn((Text::new(*title), TextFont { font_size: FontSize::Px(12.0), ..default() }, TextColor(Color::srgb(0.85, 0.8, 0.65))));
+                    p.spawn(Node { flex_wrap: FlexWrap::Wrap, column_gap: Val::Px(4.0), row_gap: Val::Px(4.0), ..default() }).with_children(|g| {
+                        for (i, id, info, dim) in cells {
+                            let (i, info) = (*i, info.clone());
+                            let mut cell = g.spawn((
+                                Node { width: Val::Px(34.0), height: Val::Px(34.0), border: UiRect::all(Val::Px(1.0)), ..default() },
+                                BorderColor::all(Color::srgb(0.3, 0.28, 0.24)),
+                                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+                            ));
+                            if let Some(img) = icon(*id) {
+                                let mut node = ImageNode::new(img);
+                                if *dim {
+                                    node.color = Color::srgb(0.35, 0.35, 0.35);
+                                }
+                                cell.insert(node);
+                            }
+                            cell.observe(move |_: On<bevy::picking::events::PointerClick>, mut ui: ResMut<SkillUi>| ui.clicked = Some(i));
+                            cell.observe(move |_: On<bevy::picking::events::PointerOver>, mut t: Single<&mut Text, With<SkillInfo>>| t.0 = info.clone());
+                        }
+                    });
+                }
+            });
+        commands.spawn((
+            SkillInfo,
+            Text::new(format!("SP: {sp}")),
+            TextFont { font_size: FontSize::Px(11.0), ..default() },
+            TextColor(Color::srgb(0.9, 0.88, 0.8)),
+            Node { position_type: PositionType::Absolute, left: Val::Px(pos.x + 8.0), top: Val::Px(pos.y + size.y + 6.0), width: Val::Px(size.x - 16.0), ..default() },
+            ChildOf(root),
+        ));
+        return;
+    }
     commands
         .spawn((
             SkillRoot,

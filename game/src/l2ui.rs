@@ -86,6 +86,26 @@ pub struct BarFill {
 #[derive(Component)]
 pub struct CtrlText;
 
+/// What building a client window needs, as one system parameter.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct UiAssets<'w, 's> {
+    pub iface: Option<Res<'w, Interface>>,
+    pub windows: Query<'w, 's, &'static Window>,
+    pub tex: ResMut<'w, UiTextures>,
+    pub lib: ResMut<'w, L2Library>,
+    pub images: ResMut<'w, Assets<Image>>,
+}
+
+impl UiAssets<'_, '_> {
+    pub fn screen(&self) -> Vec2 {
+        self.windows.iter().next().map_or(Vec2::new(1920.0, 1080.0), |w| Vec2::new(w.width(), w.height()))
+    }
+}
+
+/// Header text of a framed window.
+#[derive(Component)]
+pub struct WindowTitle;
+
 /// Icon grid of an ItemWindow: where slot `i` goes.
 #[derive(Component, Clone, Copy)]
 pub struct ItemGrid {
@@ -319,6 +339,7 @@ pub fn spawn_window(
     // Framed windows show their title in the header.
     if let Some(title) = iface.string(win.int("title")) {
         commands.spawn((
+            WindowTitle,
             Text::new(title),
             TextFont { font_size: FontSize::Px(12.0), ..default() },
             TextColor(Color::srgb(0.85, 0.8, 0.65)),
