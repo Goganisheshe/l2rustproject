@@ -68,6 +68,7 @@ fn class_change(
     mut qlog: ResMut<crate::quest::QuestLog>,
     hero: Single<(&mut HeroStats, Option<&mut crate::items::Inventory>), With<Hero>>,
     roots: Query<Entity, With<ClassChangeRoot>>,
+    (mut ua, mut clicks): (crate::l2ui::UiAssets, ResMut<crate::l2ui::UiClicks>),
 ) {
     let (mut stats, inv) = hero.into_inner();
     let class = stats.template.class_id;
@@ -97,6 +98,10 @@ fn class_change(
             }
         }
     }
+    if clicks.take("ClassChangeWnd", "later") {
+        ui.open = false;
+    }
+    let clicked = (0..options.len()).find(|i| clicks.take("ClassChangeWnd", &format!("class{i}")));
     if ui.open && (keys.just_pressed(KeyCode::Escape) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::East))) {
         ui.open = false;
     }
@@ -112,8 +117,8 @@ fn class_change(
         ui.selected = (ui.selected as i32 + input.nav).rem_euclid(options.len() as i32) as usize;
     }
     ui.selected = ui.selected.min(options.len() - 1);
-    if input.confirm || std::env::var("L2_CLASS_PICK").is_ok() {
-        let pick = std::env::var("L2_CLASS_PICK").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(ui.selected);
+    if input.confirm || clicked.is_some() || std::env::var("L2_CLASS_PICK").is_ok() {
+        let pick = std::env::var("L2_CLASS_PICK").ok().and_then(|v| v.parse::<usize>().ok()).or(clicked).unwrap_or(ui.selected);
         let new = options[pick.min(options.len() - 1)];
         if let Some(t) = dp.templates_by_id.get(&new) {
             let mut t = t.clone();
@@ -145,6 +150,26 @@ fn class_change(
     ui.shown = Some((ui.selected, class));
     for e in &roots {
         commands.entity(e).despawn();
+    }
+    // A window in the client's frame art, one button per profession.
+    if ua.iface.is_some() {
+        let n = options.len() as f32;
+        let size = Vec2::new(260.0, 96.0 + n * 30.0);
+        let root = crate::l2ui::spawn_frame(&mut commands, &mut ua, "ClassChangeWnd", "Смена профессии", size);
+        commands.entity(root).insert(ClassChangeRoot);
+        commands.spawn((
+            Text::new(format!("Текущая профессия: {}", dp.class_name(class))),
+            TextFont { font_size: FontSize::Px(12.0), ..default() },
+            TextColor(Color::srgb(0.85, 0.82, 0.75)),
+            Node { position_type: PositionType::Absolute, left: Val::Px(16.0), top: Val::Px(40.0), ..default() },
+            ChildOf(root),
+        ));
+        for (i, id) in options.iter().enumerate() {
+            let color = if i == ui.selected { Color::srgb(1.0, 0.85, 0.3) } else { Color::WHITE };
+            crate::l2ui::spawn_button(&mut commands, &mut ua, root, Vec2::new(30.0, 64.0 + i as f32 * 30.0), Vec2::new(200.0, 27.0), dp.class_name(*id), color, "ClassChangeWnd", &format!("class{i}"));
+        }
+        crate::l2ui::spawn_button(&mut commands, &mut ua, root, Vec2::new(size.x - 100.0, size.y - 36.0), Vec2::new(84.0, 27.0), "Позже", Color::WHITE, "ClassChangeWnd", "later");
+        return;
     }
     commands
         .spawn((

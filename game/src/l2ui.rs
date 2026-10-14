@@ -26,7 +26,31 @@ impl Interface {
 
 /// Loaded UI textures by xdat name (`L2UI_CT1.Windows.Windows_DF_Small_Bg`).
 #[derive(Resource, Default)]
-pub struct UiTextures(HashMap<String, Option<UiTex>>);
+pub struct UiTextures(HashMap<String, Option<UiTex>>, HashMap<String, Vec2>);
+
+impl UiTextures {
+    /// Where the player dragged a window to, if anywhere.
+    pub fn moved(&self, window: &str) -> Option<Vec2> {
+        self.1.get(window).copied()
+    }
+}
+
+/// Windows move by dragging them, as in the client, and keep the spot when
+/// they are rebuilt.
+pub fn make_draggable(commands: &mut Commands, root: Entity, name: &str) {
+    let name = name.to_string();
+    commands.entity(root).observe(move |d: On<bevy::picking::events::PointerDrag>, mut nodes: Query<&mut Node>, mut tex: ResMut<UiTextures>| {
+        if d.button != PointerButton::Primary {
+            return;
+        }
+        let Ok(mut n) = nodes.get_mut(root) else { return };
+        let (Val::Px(x), Val::Px(y)) = (n.left, n.top) else { return };
+        let p = Vec2::new(x, y) + d.delta;
+        n.left = Val::Px(p.x);
+        n.top = Val::Px(p.y);
+        tex.1.insert(name.clone(), p);
+    });
+}
 
 #[derive(Clone)]
 pub struct UiTex {
@@ -270,6 +294,66 @@ fn window_rect(x: &Xdat, win: &Element, screen: Vec2) -> Rect {
     Rect { x: p.x, y: p.y, w, h }
 }
 
+/// A window the client builds from script, drawn with the client's frame
+/// art: the large framed background and a title. Returns the root.
+pub fn spawn_frame(commands: &mut Commands, ua: &mut UiAssets, name: &str, title: &str, size: Vec2) -> Entity {
+    let screen = ua.screen();
+    let root = commands
+        .spawn((
+            UiWindow(name.into()),
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(((screen.x - size.x) / 2.0).round()),
+                top: Val::Px(((screen.y - size.y) / 3.0).round()),
+                width: Val::Px(size.x),
+                height: Val::Px(size.y),
+                ..default()
+            },
+        ))
+        .id();
+    if let Some(p) = ua.tex.moved(name) {
+        commands.entity(root).entry::<Node>().and_modify(move |mut n| {
+            n.left = Val::Px(p.x);
+            n.top = Val::Px(p.y);
+        });
+    }
+    make_draggable(commands, root, name);
+    if let Some(t) = ua.tex.get("L2UI_CT1.Windows.Windows_DF_Large_Bg", &mut ua.lib, &mut ua.images) {
+        commands.entity(root).insert(image_node(&t, None));
+    }
+    commands.spawn((
+        WindowTitle,
+        Text::new(title),
+        TextFont { font_size: FontSize::Px(12.0), ..default() },
+        TextColor(Color::srgb(0.85, 0.8, 0.65)),
+        Node { position_type: PositionType::Absolute, left: Val::Px(12.0), top: Val::Px(8.0), ..default() },
+        ChildOf(root),
+    ));
+    root
+}
+
+/// A client-style button (Button_DF) on `parent`; clicks arrive in
+/// `UiClicks` as (`window`, `ctrl`).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_button(commands: &mut Commands, ua: &mut UiAssets, parent: Entity, pos: Vec2, size: Vec2, label: &str, color: Color, window: &str, ctrl: &str) -> Entity {
+    let id = commands
+        .spawn((
+            Node { position_type: PositionType::Absolute, left: Val::Px(pos.x), top: Val::Px(pos.y), width: Val::Px(size.x), height: Val::Px(size.y), padding: UiRect::top(Val::Px(((size.y - 15.0) / 2.0).max(0.0))), ..default() },
+            Text::new(label),
+            TextFont { font_size: FontSize::Px(12.0), ..default() },
+            TextColor(color),
+            TextLayout { justify: Justify::Center, ..default() },
+            ChildOf(parent),
+        ))
+        .id();
+    if let Some(t) = ua.tex.get("L2UI_CT1.Button.Button_DF", &mut ua.lib, &mut ua.images) {
+        commands.entity(id).insert(image_node(&t, None));
+    }
+    let (w, c) = (window.to_string(), ctrl.to_string());
+    commands.entity(id).observe(move |_: On<bevy::picking::events::PointerClick>, mut clicks: ResMut<UiClicks>| clicks.0.push((w.clone(), c.clone())));
+    id
+}
+
 /// Position (inside its window) and size of a control, as laid out.
 pub fn ctrl_rect(x: &Xdat, window: &str, ctrl: &str, screen: Vec2) -> Option<(Vec2, Vec2)> {
     let win = x.window(window)?;
@@ -333,7 +417,11 @@ pub fn spawn_window(
     images: &mut Assets<Image>,
 ) -> Option<Entity> {
     let win = x.window(name)?;
-    let rect = window_rect(x, win, screen);
+    let mut rect = window_rect(x, win, screen);
+    if let Some(p) = tex.moved(win.name()) {
+        rect.x = p.x;
+        rect.y = p.y;
+    }
     let root = commands
         .spawn((
             UiWindow(win.name().to_string()),
@@ -348,6 +436,7 @@ pub fn spawn_window(
             },
         ))
         .id();
+    make_draggable(commands, root, win.name());
     if let Some(t) = tex.get(win.str("backTex"), lib, images) {
         commands.entity(root).insert(image_node(&t, None));
     }
