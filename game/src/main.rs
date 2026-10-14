@@ -2,10 +2,13 @@
 
 mod input;
 mod character;
+mod collision;
 mod effects;
 mod gamedata;
 mod l2assets;
+mod mmo;
 mod skinned;
+mod streaming;
 mod survivor;
 mod viewer;
 mod world;
@@ -15,20 +18,24 @@ use bevy::prelude::*;
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window { title: "L2 Survivor".into(), ..default() }),
+        primary_window: Some(Window { title: "Lineage II (Rust)".into(), ..default() }),
         ..default()
     }))
     .add_plugins((input::InputPlugin, l2assets::L2AssetsPlugin, skinned::SkinnedPlugin, effects::EffectsPlugin))
     .add_plugins(gamedata::GameDataPlugin)
     .add_systems(Update, debug_screenshot)
     .add_systems(Startup, cyrillic_font);
+    // Modes: L2_WORLD = world viewer, L2_MODEL = model viewer,
+    // L2_SURVIVOR = the survivors prototype; default = offline Lineage II.
     if let Ok(tiles) = std::env::var("L2_WORLD") {
         let tiles = tiles.split(',').map(|t| t.trim().to_string()).collect();
-        app.add_plugins(world::WorldPlugin { tiles });
+        app.add_plugins((streaming::TileStreamPlugin, world::WorldPlugin { tiles }));
     } else if let Ok(spec) = std::env::var("L2_MODEL") {
         app.add_plugins(viewer::ViewerPlugin { spec });
-    } else {
+    } else if std::env::var_os("L2_SURVIVOR").is_some() {
         app.add_plugins(survivor::SurvivorPlugin);
+    } else {
+        app.add_plugins((streaming::TileStreamPlugin, mmo::MmoPlugin));
     }
     app.run();
 }

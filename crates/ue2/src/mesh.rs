@@ -13,6 +13,8 @@ pub struct Section {
     pub num_faces: u32,
     /// Material object reference from the mesh's `Materials` property.
     pub material: ObjectRef,
+    /// `EnableCollision` of the material slot (walls yes, foliage no).
+    pub collision: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +48,11 @@ fn array_len(r: &mut Reader) -> Result<usize, Error> {
 /// Reads the `Materials` array property: each element is a tagged struct
 /// whose `Material` field is an object reference.
 pub fn material_list(pkg: &Package, props: &Properties) -> Result<Vec<ObjectRef>, Error> {
+    Ok(material_slots(pkg, props)?.into_iter().map(|(m, _)| m).collect())
+}
+
+/// Material slots with their `EnableCollision` flag.
+pub fn material_slots(pkg: &Package, props: &Properties) -> Result<Vec<(ObjectRef, bool)>, Error> {
     let Some(Value::Raw { data, .. }) = props.get(pkg, "Materials") else {
         return Ok(Vec::new());
     };
@@ -54,7 +61,10 @@ pub fn material_list(pkg: &Package, props: &Properties) -> Result<Vec<ObjectRef>
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let elem = Properties::read(pkg, &mut r)?;
-        out.push(elem.object(pkg, "Material").map(ObjectRef::from_raw).unwrap_or(ObjectRef::Null));
+        out.push((
+            elem.object(pkg, "Material").map(ObjectRef::from_raw).unwrap_or(ObjectRef::Null),
+            elem.bool(pkg, "EnableCollision").unwrap_or(false),
+        ));
     }
     Ok(out)
 }
@@ -63,7 +73,7 @@ pub fn read_static_mesh(pkg: &Package, export: usize) -> Result<StaticMesh, Erro
     let data = pkg.export_data(export);
     let mut r = Reader::new(data);
     let props = Properties::read(pkg, &mut r)?;
-    let materials = material_list(pkg, &props)?;
+    let materials = material_slots(pkg, &props)?;
 
     skip_box(&mut r)?; // UPrimitive::BoundingBox
     r.skip(16)?; // UPrimitive::BoundingSphere
@@ -77,8 +87,8 @@ pub fn read_static_mesh(pkg: &Package, export: usize) -> Result<StaticMesh, Erro
         r.u16()?; // last vertex
         r.u16()?;
         let num_faces = r.u16()? as u32;
-        let material = materials.get(i).copied().unwrap_or(ObjectRef::Null);
-        sections.push(Section { first_index, num_faces, material });
+        let (material, collision) = materials.get(i).copied().unwrap_or((ObjectRef::Null, false));
+        sections.push(Section { first_index, num_faces, material, collision });
     }
     skip_box(&mut r)?;
 

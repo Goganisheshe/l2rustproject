@@ -21,6 +21,13 @@ The original client is read-only input. By default it is expected at
 cargo run -p l2survivor
 ```
 
+The default mode is the offline Lineage II (see `docs/OFFLINE_PLAN.md`):
+create a character, start in your race's village, walk the streamed world
+(tiles load in the background, 3×3 around you) with building collision.
+Movement: WASD / left stick (camera-relative), Shift walks; camera: Q/E,
+right stick or right mouse drag, wheel / triggers zoom. `L2_SURVIVOR=1`
+runs the survivors prototype described below.
+
 A run starts on the character screen: 16 race/sex/archetype combinations
 (human fighter/mystic, elf, dark elf, orc fighter/mystic, dwarf, kamael),
 each assembled from the client's face, hair and starter-armor parts and
