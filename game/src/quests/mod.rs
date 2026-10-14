@@ -1,5 +1,6 @@
 //! Ported datapack scripts: quests and NPC AI with dialogs.
 
+mod adventure;
 mod baium;
 mod bounty;
 mod bounty2;
@@ -22,6 +23,7 @@ pub fn all() -> Vec<Box<dyn Quest>> {
     v.push(Box::new(bounty2::Q00360));
     v.push(Box::new(bounty2::Q00369));
     v.push(Box::new(bounty2::Q00370));
+    v.extend(adventure::ADVENTURES.iter().map(|q| Box::new(q) as Box<dyn Quest>));
     v.extend(newbie::FIRST.iter().map(|q| Box::new(q.clone()) as Box<dyn Quest>));
     v.extend(newbie::SECOND.iter().map(|q| Box::new(q.clone()) as Box<dyn Quest>));
     v
