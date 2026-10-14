@@ -25,6 +25,8 @@ pub struct ItemTemplate {
     pub icon: String,
     /// rhand, lrhand, chest, legs, head, gloves, feet, neck, ...
     pub bodypart: String,
+    /// SWORD, BLUNT, DAGGER, BOW, DUAL... for weapons.
+    pub weapon_type: String,
     pub stats: HashMap<String, f32>,
 }
 
@@ -88,7 +90,7 @@ impl Plugin for ItemsPlugin {
             .add_systems(PreStartup, load_items)
             .add_systems(
                 Update,
-                (give_starting_items, loot, apply_equipment, inventory_window).chain().run_if(in_state(Phase::InWorld)),
+                (give_starting_items, loot, apply_equipment, hero_appearance, inventory_window).chain().run_if(in_state(Phase::InWorld)),
             );
     }
 }
@@ -143,6 +145,7 @@ fn load_items(mut data: ResMut<ItemData>) {
                     kind: n.attribute("type").unwrap_or("EtcItem").to_string(),
                     icon: set("icon"),
                     bodypart: set("bodypart"),
+                    weapon_type: set("weapon_type"),
                     stats,
                 },
             );
@@ -283,6 +286,91 @@ fn apply_equipment(data: Res<ItemData>, hero: Single<(&Inventory, &mut HeroStats
     }
     stats.equip = crate::rpg::Equipment { patk, matk, pdef, mdef, atk_speed: spd };
     stats.recalc();
+}
+
+/// Animation stance suffix (`wait_<stance>`) for the equipped weapon.
+pub fn stance(weapon: Option<&ItemTemplate>) -> &'static str {
+    let Some(w) = weapon else { return "Hand" };
+    match w.weapon_type.as_str() {
+        "BOW" => "Bow",
+        "CROSSBOW" | "TWOHANDCROSSBOW" => "Bowgun",
+        "POLE" => "Pole",
+        "DUAL" | "DUALDAGGER" | "DUALBLUNT" => "Dual",
+        "FIST" | "DUALFIST" => "Hand",
+        _ if w.bodypart == "lrhand" => "2HS",
+        _ => "1HS",
+    }
+}
+
+/// Rebuilds the hero's model when equipment changes: armor pieces come from
+/// armorgrp for the hero's race, weapons and shields from weapongrp.
+#[allow(clippy::type_complexity)]
+fn hero_appearance(
+    mut commands: Commands,
+    data: Res<ItemData>,
+    gd: Res<crate::gamedata::GameData>,
+    mut lib: ResMut<L2Library>,
+    mut cache: ResMut<crate::skinned::ModelCache>,
+    mut assets: (
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<StandardMaterial>>,
+        ResMut<Assets<Image>>,
+        ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
+    ),
+    hero: Single<(Entity, &mut Hero, &Inventory), Changed<Inventory>>,
+) {
+    use crate::character::{armor_parts, armor_slot, equipment_spec, weapon_part, CLASSES};
+    use crate::skinned::{spawn_model, Attachment};
+    let (he, mut hero, inv) = hero.into_inner();
+    let class = &CLASSES[hero.class];
+    let race = armor_slot(class);
+    let mut armor: HashMap<char, String> = HashMap::new();
+    for slot in ["chest", "legs", "gloves", "feet", "onepiece"] {
+        let Some(item) = inv.equipped.get(slot) else { continue };
+        let Some(model) = gd.armors.get(item).and_then(|a| a.models.get(race)) else { continue };
+        let parts = armor_parts(model);
+        let full = matches!(data.items.get(item).map(|t| t.bodypart.as_str()), Some("onepiece" | "alldress"));
+        if full && !parts.iter().any(|(c, _)| *c == 'l') {
+            armor.insert('l', String::new()); // the robe covers the legs
+        }
+        for (c, part) in parts {
+            armor.insert(c, part);
+        }
+    }
+    let spec = equipment_spec(&mut lib, class, &armor);
+
+    let weapon_item = inv.equipped.get("rhand").copied();
+    let weapon = weapon_item.and_then(|i| data.items.get(&i));
+    let (meshes, materials, images, bindposes) = &mut assets;
+    let mut attachments: Vec<Attachment> = Vec::new();
+    let mut attach = |bone: &'static str, item: u32, index: usize, lib: &mut L2Library| {
+        let Some(w) = gd.weapons.get(&item) else { return };
+        let Some(mesh) = w.meshes.get(index) else { return };
+        let Some((pkg, part)) = weapon_part(mesh, w.textures.get(index)) else { return };
+        if let Some(parts) = lib.rigid_mesh(&pkg, &part, meshes, materials, images) {
+            attachments.push(Attachment { bone, parts });
+        }
+    };
+    let stance = stance(weapon);
+    if let Some(item) = weapon_item {
+        match stance {
+            "Bow" | "Bowgun" => attach("Weapon_L_Bone", item, 0, &mut lib),
+            "Dual" => {
+                attach("Weapon_R_Bone", item, 0, &mut lib);
+                attach("Weapon_L_Bone", item, 1, &mut lib);
+            }
+            _ => attach("Weapon_R_Bone", item, 0, &mut lib),
+        }
+    }
+    if let Some(&shield) = inv.equipped.get("lhand") {
+        attach("Shield_L_Bone", shield, 0, &mut lib);
+    }
+    let Some(model) = cache.load(&mut lib, class.package, &spec, None, meshes, materials, images, bindposes) else {
+        return;
+    };
+    commands.entity(hero.actor).despawn();
+    hero.actor = spawn_model(&mut commands, &model, he, &format!("wait_{stance}"), &attachments);
+    hero.stance = stance;
 }
 
 // ---------------------------------------------------------------------------

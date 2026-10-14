@@ -16,6 +16,7 @@ fn main() -> Result<()> {
         Some("effect") => dump_effect(&args[2], &args[3]),
         Some("defaults") => class_defaults(&args[2], &args[3]),
         Some("dat") => dat_summary(&args[2]),
+        Some("datdump") => Ok(std::fs::write(&args[3], ue2::dat::read_dat(&args[2])?)?),
         Some("map") => map_info(&args[2], &args[3]),
         Some("bsp") => bsp_probe(&args[2], &args[3]),
         Some("bspinfo") => {
@@ -402,6 +403,24 @@ pub fn dat_summary(client: &str) -> Result<()> {
     println!("animationcombo: {} entries", combos.len());
     let npcs = parse_npcgrp(&read_dat(sys.join("npcgrp.dat"))?, &names)?;
     println!("npcgrp: {} entries", npcs.len());
+    let weapons = parse_weapongrp(&read_dat(sys.join("weapongrp.dat"))?, &names)?;
+    println!("weapongrp: {} entries", weapons.len());
+    let armors = parse_armorgrp(&read_dat(sys.join("armorgrp.dat"))?, &names)?;
+    println!("armorgrp: {} entries", armors.len());
+    let mut parts: std::collections::BTreeMap<u8, (usize, String)> = Default::default();
+    for a in &armors {
+        let e = parts.entry(a.body_part).or_insert((0, format!("{} {:?}", a.id, a.models[0].meshes)));
+        e.0 += 1;
+    }
+    for (p, (n, ex)) in parts {
+        println!("  part {p}: {n} e.g. {ex}");
+    }
+    for a in armors.iter().filter(|a| matches!(a.id, 1146 | 1147 | 21 | 28 | 425 | 461)) {
+        println!("  armor {} part {} type {} hide {:x}: {:?}", a.id, a.body_part, a.armor_type, a.hide_mask, &a.models[..2]);
+    }
+    for w in weapons.iter().filter(|w| matches!(w.id, 1 | 2369 | 6 | 177 | 2 | 10)) {
+        println!("  weapon {:?}", w);
+    }
     for s in skills.iter().filter(|s| matches!(s.id, 3 | 1177 | 1011) && s.level == 1) {
         println!(
             "  skill {} {:?}: anims {:?} -> {:?}, visual {}, icon {}, ep {}, magic {}, op {}, hit {}",

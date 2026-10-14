@@ -205,8 +205,11 @@ fn build_model(
             ),
             None => (spec, Vec::new()),
         };
-        let Some(h) = l.find(package, part) else {
-            warn!("{package}:{part} not found");
+        // `Package.Mesh` names a mesh outside the model's own package (armor
+        // sets from armorgrp are spelled this way).
+        let (pkg, part) = part.split_once('.').unwrap_or((package, part));
+        let Some(h) = l.find(pkg, part) else {
+            warn!("{pkg}:{part} not found");
             continue;
         };
         match ue2::skel::read_skeletal_mesh(&h.package, h.export) {

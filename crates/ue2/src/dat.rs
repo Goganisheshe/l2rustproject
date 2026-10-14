@@ -331,3 +331,151 @@ pub fn parse_npcgrp(data: &[u8], names: &GameDataNames) -> Result<Vec<NpcGrp>, E
     }
     Ok(out)
 }
+
+#[derive(Debug, Clone)]
+pub struct WeaponGrp {
+    pub id: u32,
+    /// Static meshes, e.g. `LineageWeapons.small_sword_m00_wp`; two for dual weapons.
+    pub meshes: Vec<String>,
+    pub textures: Vec<String>,
+    pub body_part: u8,
+    pub handness: u8,
+    pub weapon_type: u8,
+}
+
+/// Parses `weapongrp.dat` (L2ClientDat "Helios" layout, used by Salvation clients).
+pub fn parse_weapongrp(data: &[u8], names: &GameDataNames) -> Result<Vec<WeaponGrp>, Error> {
+    let mut r = Reader::new(data);
+    let n = r.u32()? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        r.u8()?; // tag
+        let id = r.u32()?;
+        r.skip(4)?; // drop type, anim, radius, height
+        let k = r.u8()? as usize;
+        for _ in 0..k {
+            r.u32()?; // drop mesh
+            let t = r.u8()? as usize;
+            r.skip(t * 4)?;
+        }
+        r.skip(20)?; // icons
+        r.skip(4)?; // durability, weight
+        r.skip(2)?; // material, crystallizable
+        let q = r.u8()? as usize;
+        r.skip(q * 2)?;
+        r.skip(2)?; // color, attribution
+        r.skip(2)?; // property params
+        r.skip(8)?; // icon panel, drop sound type
+        r.u8()?; // inventory type
+        let body_part = r.u8()?;
+        let handness = r.u8()?;
+        let m = r.u8()? as usize;
+        let mut meshes = Vec::with_capacity(m);
+        for _ in 0..m {
+            meshes.push(names.get(r.u32()?).to_string());
+        }
+        r.skip(m)?;
+        let t = r.u8()? as usize;
+        let mut textures = Vec::with_capacity(t);
+        for _ in 0..t {
+            textures.push(names.get(r.u32()?).to_string());
+        }
+        let s = r.u8()? as usize;
+        r.skip(s * 4)?;
+        r.skip(12)?; // drop / equip sound, effect
+        r.u8()?; // random damage
+        let weapon_type = r.u8()?;
+        r.skip(4)?; // grade, mp, soulshots, spiritshots
+        r.skip(2)?; // curvature
+        r.skip(3)?; // unk, hero, magic
+        r.skip(4)?; // ertheia fist scale
+        r.skip(2)?;
+        let e = r.u8()? as usize;
+        r.skip(e * (4 + 4 * 21) + 4)?;
+        r.skip(6)?; // variation effect types
+        let v = r.u8()? as usize;
+        r.skip(v * 4)?;
+        r.skip(2)?; // ensoul slots
+        out.push(WeaponGrp { id, meshes, textures, body_part, handness, weapon_type });
+    }
+    Ok(out)
+}
+
+/// One race/gender slot of an armor: mesh and its section textures.
+#[derive(Debug, Clone, Default)]
+pub struct ArmorModel {
+    pub meshes: Vec<String>,
+    pub textures: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArmorGrp {
+    pub id: u32,
+    pub body_part: u8,
+    /// Slots in client order: m/f HumnFigh, DarkElf, Dorf, Elf, HumnMyst, OrcFigh,
+    /// OrcMage, Kamael, Ertheia, then NPC.
+    pub models: Vec<ArmorModel>,
+    pub armor_type: u8,
+    pub hide_mask: u16,
+}
+
+pub const ARMOR_SLOTS: [&str; 19] = [
+    "m_HumnFigh", "f_HumnFigh", "m_DarkElf", "f_DarkElf", "m_Dorf", "f_Dorf", "m_Elf", "f_Elf",
+    "m_HumnMyst", "f_HumnMyst", "m_OrcFigh", "f_OrcFigh", "m_OrcMage", "f_OrcMage", "m_Kamael",
+    "f_Kamael", "m_Ertheia", "f_Ertheia", "NPC",
+];
+
+/// Parses `armorgrp.dat` (L2ClientDat "Helios" layout).
+pub fn parse_armorgrp(data: &[u8], names: &GameDataNames) -> Result<Vec<ArmorGrp>, Error> {
+    let mut r = Reader::new(data);
+    let n = r.u32()? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        r.u8()?; // tag
+        let id = r.u32()?;
+        r.skip(4)?;
+        let k = r.u8()? as usize;
+        for _ in 0..k {
+            r.u32()?;
+            let t = r.u8()? as usize;
+            r.skip(t * 4)?;
+        }
+        r.skip(20 + 4 + 2)?;
+        let q = r.u8()? as usize;
+        r.skip(q * 2)?;
+        r.skip(4 + 8)?;
+        r.u8()?; // inventory type
+        let body_part = r.u8()?;
+        let mut models = Vec::with_capacity(ARMOR_SLOTS.len());
+        for _ in 0..ARMOR_SLOTS.len() {
+            let m = r.u8()? as usize;
+            let mut meshes = Vec::with_capacity(m);
+            for _ in 0..m {
+                meshes.push(names.get(r.u32()?).to_string());
+            }
+            let t = r.u8()? as usize;
+            let mut textures = Vec::with_capacity(t);
+            for _ in 0..t {
+                textures.push(names.get(r.u32()?).to_string());
+            }
+            models.push(ArmorModel { meshes, textures });
+            // additional meshes (unused): meshes, per-mesh flags, textures, effect
+            let a = r.u8()? as usize;
+            r.skip(a * 6)?;
+            let b = r.u8()? as usize;
+            r.skip(b * 4 + 4)?;
+        }
+        r.u32()?; // attack effect
+        let s = r.u8()? as usize;
+        r.skip(s * 4)?;
+        r.skip(12)?; // drop/equip sound, unk
+        r.u8()?;
+        let armor_type = r.u8()?;
+        r.u8()?; // grade
+        r.skip(2)?; // mp bonus
+        let hide_mask = r.u16()?;
+        r.skip(3)?;
+        out.push(ArmorGrp { id, body_part, models, armor_type, hide_mask });
+    }
+    Ok(out)
+}

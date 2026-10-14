@@ -80,6 +80,10 @@ pub struct GameData {
     pub npc_models: HashMap<u32, (String, String)>,
     /// Client-side visuals (animations, effects, icon) for every skill id.
     pub visuals: HashMap<u32, Arc<SkillDef>>,
+    /// Weapon models by item id (weapongrp).
+    pub weapons: HashMap<u32, dat::WeaponGrp>,
+    /// Armor models per race by item id (armorgrp).
+    pub armors: HashMap<u32, dat::ArmorGrp>,
 }
 
 impl GameData {
@@ -143,6 +147,8 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
     })?)?;
     let combos = dat::parse_animationcombo(&dat::read_dat(sys.join("animationcombo.dat"))?, &names)?;
     let npcs = dat::parse_npcgrp(&dat::read_dat(sys.join("npcgrp.dat"))?, &names)?;
+    let weapons = dat::parse_weapongrp(&dat::read_dat(sys.join("weapongrp.dat"))?, &names)?;
+    let armors = dat::parse_armorgrp(&dat::read_dat(sys.join("armorgrp.dat"))?, &names)?;
 
     let effects = lib.lib.as_mut().and_then(|l| l.package("lineageskilleffect"));
     let visuals = effects.map(|p| skill_visuals(&p)).unwrap_or_default();
@@ -228,7 +234,9 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
             radius: (n.collision_radius * UU_TO_M).clamp(0.3, 1.2),
         });
     }
-    Ok(GameData { skills, monsters, npc_models, visuals: all_visuals })
+    let weapons = weapons.into_iter().map(|w| (w.id, w)).collect();
+    let armors = armors.into_iter().map(|a| (a.id, a)).collect();
+    Ok(GameData { skills, monsters, npc_models, visuals: all_visuals, weapons, armors })
 }
 
 /// `CastMidAnimName` -> `CastMid`.

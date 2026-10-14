@@ -216,7 +216,7 @@ fn run_cast(
     if stage != cast.stage {
         cast.stage = stage;
         if let (Ok(mut a), Some(base)) = (anims.get_mut(hero.actor), anims_list.get(stage)) {
-            let names = [format!("{base}_1HS"), base.clone(), "Atk01_1HS".to_string()];
+            let names = [format!("{base}_{}", hero.stance), format!("{base}_1HS"), base.clone(), format!("Atk01_{}", hero.stance)];
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             let looping = stage == 0 && anims_list.len() > 1;
             a.restart(&names, looping);

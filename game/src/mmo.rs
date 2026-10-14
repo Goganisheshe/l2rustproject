@@ -94,6 +94,17 @@ struct ClassLine(usize);
 #[derive(Component)]
 pub struct Hero {
     pub actor: Entity,
+    /// Index into `CLASSES`.
+    pub class: usize,
+    /// Weapon stance suffix of animation clips: `1HS`, `2HS`, `Bow`...
+    pub stance: &'static str,
+}
+
+impl Hero {
+    /// `<clip>_<stance>` followed by fallbacks, for `Animated::play`.
+    pub fn clips(&self, clip: &str, fallback: &str) -> [String; 3] {
+        [format!("{clip}_{}", self.stance), format!("{clip}_1HS"), fallback.to_string()]
+    }
 }
 
 #[derive(Component)]
@@ -287,7 +298,7 @@ fn enter_world(
     let mut stats = HeroStats::new(template);
     stats.respawn = pos;
     stats.class_key = template_for(class.prefix).to_string();
-    commands.entity(hero).insert((Hero { actor }, stats));
+    commands.entity(hero).insert((Hero { actor, class: c.index, stance: "1HS" }, stats));
     spawn_hud(&mut commands);
     commands.spawn((
         HudText,
@@ -342,13 +353,14 @@ fn move_hero(
         return; // combat drives the animation
     }
     if let Ok(mut anim) = anims.get_mut(hero.actor) {
-        if moving && walking {
-            anim.play(&["walk_1HS", "walk"], true);
+        let names = if moving && walking {
+            hero.clips("walk", "walk")
         } else if moving {
-            anim.play(&["run_1HS", "run"], true);
+            hero.clips("run", "run")
         } else {
-            anim.play(&["wait_1HS", "Wait"], true);
-        }
+            hero.clips("wait", "Wait")
+        };
+        anim.play(&names.each_ref().map(String::as_str), true);
     }
 }
 

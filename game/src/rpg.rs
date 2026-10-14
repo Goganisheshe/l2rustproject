@@ -491,21 +491,21 @@ fn hero_attack(
         let speed = stats.run_speed * UU_TO_M;
         tr.translation += to.normalize() * speed * dt;
         if let Some(a) = anim.as_mut() {
-            a.play(&["run_1HS", "run"], true);
+            a.play(&hero.clips("run", "run").each_ref().map(String::as_str), true);
         }
         return;
     }
     if stats.atk_timer > 0.0 {
         if let Some(a) = anim.as_mut() {
             if a.finished() || a.looping {
-                a.play(&["AtkWait_1HS", "wait_1HS"], true);
+                a.play(&hero.clips("AtkWait", "wait_1HS").each_ref().map(String::as_str), true);
             }
         }
         return;
     }
     stats.atk_timer = stats.atk_interval;
     if let Some(a) = anim.as_mut() {
-        a.restart(&["Atk01_1HS", "atk01"], false);
+        a.restart(&hero.clips("Atk01", "atk01").each_ref().map(String::as_str), false);
     }
     let mut rng = rand::rng();
     let (dmg, crit) = damage(stats.patk, npc.template.pdef, &mut rng);
