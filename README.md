@@ -79,7 +79,10 @@ teleports and the quest pages. What is playable:
   (click to equip / use); the character status (Alt+T); the skill window (K;
   hover shows a skill, click learns it or puts it on the bar); NPC dialogs in
   the NPCDialogWnd frame; the map (M) in MinimapWnd with wheel zoom; the
-  restart menu on death; the system menu (Alt+X, "Quit" saves and exits).
+  restart menu on death; the system menu (Alt+X, "Quit" saves and exits);
+  the quest window (Alt+U); the main menu bar (bottom right, the client's
+  `Icon_DF_MenuWnd_*` buttons); class change in a window drawn with the
+  client's frame art. Windows can be dragged and keep their place.
   Without `interface.xdat` the game falls back to plain panels.
 
 Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
