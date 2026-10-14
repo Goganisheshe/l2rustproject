@@ -15,6 +15,7 @@ mod gamedata;
 mod l2assets;
 mod mmo;
 mod rpg;
+mod services;
 mod skillplay;
 mod skinned;
 mod streaming;

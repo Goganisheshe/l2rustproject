@@ -29,6 +29,8 @@ pub struct ItemTemplate {
     pub weapon_type: String,
     /// Skills cast when the item is used (scrolls, potions).
     pub skills: Vec<u32>,
+    /// Shop price in Adena.
+    pub price: u64,
     pub stats: HashMap<String, f32>,
 }
 
@@ -149,6 +151,7 @@ fn load_items(mut data: ResMut<ItemData>) {
                     icon: set("icon"),
                     bodypart: set("bodypart"),
                     weapon_type: set("weapon_type"),
+                    price: set("price").parse().unwrap_or(0),
                     skills: n
                         .children()
                         .filter(|c| c.has_tag_name("skills"))

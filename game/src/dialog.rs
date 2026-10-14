@@ -18,12 +18,14 @@ use crate::l2assets::UU_TO_M;
 use crate::mmo::{Hero, Phase};
 use crate::quest::{self, Player, QuestLog, Quests, ALREADY_COMPLETED, NO_QUEST};
 use crate::rpg::{HeroStats, Log, Npc, NpcState};
+use crate::services;
 use crate::skinned::Animated;
 use crate::streaming::{ue_to_bevy, TileStreamer};
 
 /// Datapack pages: `html/**` by file name and script folders by name.
 #[derive(Resource, Default)]
 pub struct Pages {
+    root: PathBuf,
     html_root: PathBuf,
     html: HashMap<String, PathBuf>,
     scripts: HashMap<String, PathBuf>,
@@ -31,7 +33,7 @@ pub struct Pages {
 
 impl Pages {
     fn load(root: &Path) -> Self {
-        let mut p = Pages { html_root: root.join("html"), ..default() };
+        let mut p = Pages { root: root.to_path_buf(), html_root: root.join("html"), ..default() };
         fn walk(dir: &Path, f: &mut dyn FnMut(&Path, bool)) {
             let Ok(rd) = std::fs::read_dir(dir) else { return };
             for e in rd.flatten() {
@@ -366,15 +368,43 @@ fn execute(cmd: &str, npc: u32, pages: &Pages, quests: &Quests, qlog: &mut Quest
     // npc_<objectId>_<Command> <args>
     if let Some(rest) = head.strip_prefix("npc_") {
         let sub = rest.split_once('_').map_or("", |(_, c)| c);
+        let num = |i: usize| args.split_whitespace().nth(i).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let root = &pages.root;
         return match sub {
             "Chat" => pages.npc(npc, args.parse().unwrap_or(0)),
             "Quest" => quest_command(args, npc, pages, quests, qlog, p),
             "Link" => pages.link(args),
+            "Buy" => Some(services::buy_page(root, p, num(0), 0, "")),
+            "Sell" => Some(services::sell_page(p, 0, 0, "")),
+            "multisell" | "Multisell" | "exc_multisell" => Some(services::multisell_page(root, p, num(0), 0, "")),
+            "showTeleportList" | "showTeleports" => Some(services::teleport_page(root, p, 0, "")),
+            "teleport" => {
+                let mut a = args.split_whitespace();
+                let kind = a.next().unwrap_or("OTHER");
+                let index = a.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                if !services::npc_teleport(root, p, npc, kind, index) {
+                    p.log.push("This teleport is not available yet.");
+                }
+                None
+            }
             other => {
                 p.log.push(format!("Not available yet: {other}"));
                 None
             }
         };
+    }
+    let num = |i: usize| args.split_whitespace().nth(i).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    let root = &pages.root;
+    match head {
+        "shop_list" => return Some(services::buy_page(root, p, num(0), num(1) as usize, "")),
+        "shop_buy" => return Some(services::buy(root, p, num(0), num(1), num(2).max(1) as u64, num(3) as usize)),
+        "shop_sell" => return Some(services::sell_page(p, num(0), num(1) as usize, "")),
+        "shop_sellitem" => return Some(services::sell(p, num(0), num(1), num(2) as usize)),
+        "ms_list" => return Some(services::multisell_page(root, p, num(0), num(1) as usize, "")),
+        "ms_exchange" => return Some(services::exchange(root, p, num(0), num(1) as usize, num(2) as usize)),
+        "tele_list" => return Some(services::teleport_page(root, p, num(0) as usize, "")),
+        "tele_go" => return services::teleport(root, p, num(0), num(1) as usize),
+        _ => {}
     }
     match head {
         "Link" => pages.link(args),
