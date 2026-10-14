@@ -16,6 +16,28 @@ fn main() -> Result<()> {
         Some("effect") => dump_effect(&args[2], &args[3]),
         Some("defaults") => class_defaults(&args[2], &args[3]),
         Some("dat") => dat_summary(&args[2]),
+        Some("xdat") => {
+            let x = ue2::xdat::parse(&std::fs::read(&args[2])?)?;
+            println!("{:?} bytes; {} shortcuts, {} windows, {} wnd pos, {} fonts, {} styles", x.consumed, x.shortcuts.len(), x.windows.len(), x.wnd_def_pos.len(), x.fonts.len(), x.styles.len());
+            fn dump(e: &ue2::xdat::Element, depth: usize, max: usize) {
+                if depth > max {
+                    return;
+                }
+                println!("{}{} [{}] {}x{} at {:?} {},{} tex {}", "  ".repeat(depth), e.name(), e.class, e.int("width"), e.int("height"), e.str("relativeTo"), e.float("x"), e.float("y"), [e.str("file"), e.str("backTex"), e.str("normalTex"), e.str("foreTex")].concat());
+                for c in e.children() {
+                    dump(c, depth + 1, max);
+                }
+            }
+            let filter = args.get(3).cloned().unwrap_or_default();
+            for w in &x.windows {
+                if filter.is_empty() {
+                    println!("{} ({} children)", w.name(), w.children().len());
+                } else if w.name().eq_ignore_ascii_case(&filter) {
+                    dump(w, 0, 6);
+                }
+            }
+            Ok(())
+        }
         Some("datdump") => Ok(std::fs::write(&args[3], ue2::dat::read_dat(&args[2])?)?),
         Some("map") => map_info(&args[2], &args[3]),
         Some("bsp") => bsp_probe(&args[2], &args[3]),

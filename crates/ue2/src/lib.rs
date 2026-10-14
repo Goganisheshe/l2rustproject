@@ -13,6 +13,8 @@ pub mod reader;
 pub mod skel;
 pub mod texture;
 pub mod world;
+pub mod xdat;
+pub mod xdat_schema;
 
 pub use package::{Export, Import, ObjectRef, Package};
 pub use reader::Reader;
