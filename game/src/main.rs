@@ -1,4 +1,4 @@
-//! L2 Survivor: Lineage II assets driven by a Vampire Survivors style loop.
+//! Lineage II rebuilt in Rust on Bevy from the original client's assets.
 
 mod input;
 mod items;
@@ -21,7 +21,6 @@ mod services;
 mod skillplay;
 mod skinned;
 mod streaming;
-mod survivor;
 mod viewer;
 mod world;
 
@@ -37,15 +36,12 @@ fn main() {
     .add_plugins(gamedata::GameDataPlugin)
     .add_systems(Update, debug_screenshot)
     .add_systems(Startup, cyrillic_font);
-    // Modes: L2_WORLD = world viewer, L2_MODEL = model viewer,
-    // L2_SURVIVOR = the survivors prototype; default = offline Lineage II.
+    // Modes: L2_WORLD = world viewer, L2_MODEL = model viewer; default = the game.
     if let Ok(tiles) = std::env::var("L2_WORLD") {
         let tiles = tiles.split(',').map(|t| t.trim().to_string()).collect();
         app.add_plugins((streaming::TileStreamPlugin, world::WorldPlugin { tiles }));
     } else if let Ok(spec) = std::env::var("L2_MODEL") {
         app.add_plugins(viewer::ViewerPlugin { spec });
-    } else if std::env::var_os("L2_SURVIVOR").is_some() {
-        app.add_plugins(survivor::SurvivorPlugin);
     } else {
         app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin, save::SavePlugin, npcskills::NpcSkillsPlugin));
     }

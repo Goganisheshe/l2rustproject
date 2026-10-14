@@ -1,4 +1,4 @@
-//! Skills and monsters from the client's data tables.
+//! Skill visuals, NPC models and equipment models from the client's data tables.
 //!
 //! A skill is assembled from three sources:
 //! - `skillgrp.dat`: timings, range, power, magic flag and an animation combo
@@ -61,21 +61,8 @@ pub struct SkillDef {
     pub flying_time: f32,
 }
 
-#[derive(Debug, Clone)]
-pub struct MonsterKind {
-    pub npc_id: u32,
-    pub package: String,
-    pub mesh: String,
-    /// Model spec for `ModelCache::load` including texture overrides.
-    pub spec: String,
-    /// Collision radius in meters.
-    pub radius: f32,
-}
-
 #[derive(Resource, Default)]
 pub struct GameData {
-    pub skills: Vec<Arc<SkillDef>>,
-    pub monsters: Vec<MonsterKind>,
     /// Every npcgrp entry's model: id -> (package, model spec with textures).
     pub npc_models: HashMap<u32, (String, String)>,
     /// Client-side visuals (animations, effects, icon) for every skill id.
@@ -84,12 +71,6 @@ pub struct GameData {
     pub weapons: HashMap<u32, dat::WeaponGrp>,
     /// Armor models per race by item id (armorgrp).
     pub armors: HashMap<u32, dat::ArmorGrp>,
-}
-
-impl GameData {
-    pub fn skill(&self, id: u32) -> Option<&Arc<SkillDef>> {
-        self.skills.iter().find(|s| s.id == id)
-    }
 }
 
 pub struct GameDataPlugin;
@@ -104,34 +85,7 @@ fn load_game_data(mut data: ResMut<GameData>, mut lib: ResMut<L2Library>) {
     let root = std::env::var_os("L2_CLIENT_DIR").map(PathBuf::from).unwrap_or_else(|| DEFAULT_CLIENT_DIR.into());
     match load(&root, &mut lib) {
         Ok(d) => {
-            info!(
-                "game data: {} usable skills ({} magic), {} monster kinds",
-                d.skills.len(),
-                d.skills.iter().filter(|s| s.magic).count(),
-                d.monsters.len()
-            );
-            // L2_LIST_SKILLS=<file> dumps the playable skill table.
-            if let Ok(path) = std::env::var("L2_LIST_SKILLS") {
-                let lines: Vec<String> = d
-                    .skills
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "{}	{}	{}	{:?}	fly={}	cast={:?}	shot={:?}	expl={:?}",
-                            s.id,
-                            s.name,
-                            if s.magic { "magic" } else { "phys" },
-                            s.anims,
-                            s.flying_time,
-                            s.casting.iter().map(|f| &f.class).collect::<Vec<_>>(),
-                            s.shot.iter().map(|f| &f.class).collect::<Vec<_>>(),
-                            s.explosion.iter().map(|f| &f.class).collect::<Vec<_>>()
-                        )
-                    })
-                    .collect();
-                let _ = std::fs::write(path, lines.join("
-"));
-            }
+            info!("game data: {} skill visuals, {} npc models", d.visuals.len(), d.npc_models.len());
             *data = d;
         }
         Err(e) => warn!("could not load client data tables: {e}"),
@@ -153,9 +107,7 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
     let effects = lib.lib.as_mut().and_then(|l| l.package("lineageskilleffect"));
     let visuals = effects.map(|p| skill_visuals(&p)).unwrap_or_default();
 
-    // Every skill's visuals (any operate type), plus the offensive subset
-    // used by the survivors mode.
-    let mut skills = Vec::new();
+    // Every skill's client visuals (any operate type).
     let mut all_visuals = HashMap::new();
     for s in skillgrp.iter().filter(|s| s.level == 1 && s.sublevel == 0) {
         let combo = s.animations.first().and_then(|c| combos.get(c));
@@ -177,16 +129,7 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
             flying_time: v.flying_time,
         });
         all_visuals.insert(s.id, def.clone());
-        // Offensive actives only: negative effect point, active operate types.
-        if s.effect_point >= 0 || s.operate_type > 1 || s.cast_range == 0 || s.is_magic > 1 {
-            continue;
-        }
-        if def.name.is_empty() || def.anims.is_empty() || (v.casting.is_empty() && v.shot.is_empty() && v.explosion.is_empty()) {
-            continue;
-        }
-        skills.push(def);
     }
-    skills.sort_by_key(|s| s.id);
 
     let mut npc_models = HashMap::new();
     for n in &npcs {
@@ -203,40 +146,9 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
         npc_models.insert(n.id, (pkg.to_string(), spec));
     }
 
-    let mut seen = std::collections::HashSet::new();
-    let mut monsters = Vec::new();
-    for n in &npcs {
-        if !n.class_name.to_ascii_lowercase().starts_with("lineagemonster") {
-            continue;
-        }
-        let Some((pkg, mesh)) = n.mesh.split_once('.') else { continue };
-        if !pkg.to_ascii_lowercase().starts_with("lineagemonsters") || !seen.insert(n.mesh.to_ascii_lowercase()) {
-            continue;
-        }
-        // Skip tiny critters and raid-boss giants: they do not read well in a horde.
-        if !(6.0..=30.0).contains(&n.collision_radius) || !(8.0..=60.0).contains(&n.collision_height) {
-            continue;
-        }
-        let textures: Vec<String> = n
-            .textures
-            .iter()
-            .filter_map(|t| {
-                let (p, rest) = t.split_once('.')?;
-                Some(format!("{p}/{}", rest.rsplit('.').next().unwrap_or(rest)))
-            })
-            .collect();
-        let spec = if textures.is_empty() { mesh.to_string() } else { format!("{mesh}@{}", textures.join("|")) };
-        monsters.push(MonsterKind {
-            npc_id: n.id,
-            package: pkg.to_string(),
-            mesh: mesh.to_string(),
-            spec,
-            radius: (n.collision_radius * UU_TO_M).clamp(0.3, 1.2),
-        });
-    }
     let weapons = weapons.into_iter().map(|w| (w.id, w)).collect();
     let armors = armors.into_iter().map(|a| (a.id, a)).collect();
-    Ok(GameData { skills, monsters, npc_models, visuals: all_visuals, weapons, armors })
+    Ok(GameData { npc_models, visuals: all_visuals, weapons, armors })
 }
 
 /// `CastMidAnimName` -> `CastMid`.
