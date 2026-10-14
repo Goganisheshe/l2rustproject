@@ -44,6 +44,13 @@ pub struct HeroSkills {
     last_class: u32,
 }
 
+impl HeroSkills {
+    /// Skills from a save game; `learn_skills` resumes from this level / SP.
+    pub fn restored(learned: BTreeMap<u32, u32>, hotbar: Vec<u32>, level: u32, sp: u64, class: u32) -> Self {
+        HeroSkills { learned, hotbar, last_level: level, last_sp: sp, last_class: class, ..default() }
+    }
+}
+
 struct Cast {
     skill: u32,
     level: u32,

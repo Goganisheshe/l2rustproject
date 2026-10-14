@@ -3419,6 +3419,8 @@ dependencies = [
  "bevy",
  "rand 0.9.5",
  "roxmltree",
+ "serde",
+ "serde_json",
  "ue2",
 ]
 

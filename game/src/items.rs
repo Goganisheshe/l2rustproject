@@ -240,14 +240,20 @@ pub fn roll_drops(rules: &[DropRule], rng: &mut impl Rng) -> Vec<(u32, u64)> {
     out
 }
 
-fn give_starting_items(
+pub fn give_starting_items(
     mut commands: Commands,
     data: Res<ItemData>,
+    dp: Res<crate::datapack::Datapack>,
     hero: Single<(Entity, &HeroStats), (With<Hero>, Without<Inventory>)>,
 ) {
     let (e, stats) = hero.into_inner();
     let mut inv = Inventory::default();
-    for &(item, count, equipped) in data.initial.get(&stats.template.class_id).into_iter().flatten() {
+    // The kit belongs to the starting class (the root of the class tree).
+    let mut class = stats.template.class_id;
+    while let Some((_, Some(parent))) = dp.class_list.get(&class) {
+        class = *parent;
+    }
+    for &(item, count, equipped) in data.initial.get(&class).into_iter().flatten() {
         *inv.items.entry(item).or_default() += count;
         if let (true, Some(t)) = (equipped, data.items.get(&item)) {
             inv.equipped.insert(t.slot().to_string(), item);

@@ -26,7 +26,13 @@ const WALK_SPEED: f32 = 60.0 / 27.0;
 
 /// Starting point: the class template's creation point from the datapack,
 /// else the race's newbie village. `L2_START="x,y,z"` overrides.
+/// Start position chosen by a loaded save game.
+pub static START_OVERRIDE: std::sync::Mutex<Option<[f32; 3]>> = std::sync::Mutex::new(None);
+
 fn start_location(class: &CharClass, dp: &Datapack) -> [f32; 3] {
+    if let Some(p) = *START_OVERRIDE.lock().unwrap() {
+        return p;
+    }
     if let Some(p) = std::env::var("L2_START").ok().and_then(|s| {
         let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         (v.len() == 3).then(|| [v[0], v[1], v[2]])
@@ -66,8 +72,8 @@ pub enum Phase {
 }
 
 #[derive(Resource, Default)]
-struct Creation {
-    index: usize,
+pub struct Creation {
+    pub index: usize,
     shown: Option<usize>,
     model: Option<Arc<Model>>,
     weapon: Vec<crate::l2assets::MeshPart>,
