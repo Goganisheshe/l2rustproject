@@ -106,4 +106,65 @@ impl Properties {
             _ => None,
         }
     }
+    pub fn float(&self, pkg: &Package, name: &str) -> Option<f32> {
+        match self.get(pkg, name)? {
+            Value::Float(f) => Some(*f),
+            Value::Int(i) => Some(*i as f32),
+            _ => None,
+        }
+    }
+
+    pub fn bool(&self, pkg: &Package, name: &str) -> Option<bool> {
+        match self.get(pkg, name)? {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Raw bytes of a struct/array property.
+    pub fn raw(&self, pkg: &Package, name: &str) -> Option<&[u8]> {
+        match self.get(pkg, name)? {
+            Value::Raw { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Non-native structs (Range, RangeVector, ...) are themselves tagged
+    /// property streams.
+    pub fn nested(&self, pkg: &Package, name: &str) -> Option<Properties> {
+        let data = self.raw(pkg, name)?;
+        Properties::read(pkg, &mut Reader::new(data)).ok()
+    }
+
+    /// Native `Vector` struct: three raw floats.
+    pub fn vector(&self, pkg: &Package, name: &str) -> Option<[f32; 3]> {
+        let d = self.raw(pkg, name)?;
+        if d.len() < 12 {
+            return None;
+        }
+        let f = |i: usize| f32::from_le_bytes(d[i * 4..i * 4 + 4].try_into().unwrap());
+        Some([f(0), f(1), f(2)])
+    }
+
+    /// `Range { Min, Max }`; missing fields are 0.
+    pub fn range(&self, pkg: &Package, name: &str) -> Option<[f32; 2]> {
+        let r = self.nested(pkg, name)?;
+        Some([r.float(pkg, "Min").unwrap_or(0.0), r.float(pkg, "Max").unwrap_or(0.0)])
+    }
+
+    /// `RangeVector { X, Y, Z: Range }`.
+    pub fn range_vector(&self, pkg: &Package, name: &str) -> Option<[[f32; 2]; 3]> {
+        let r = self.nested(pkg, name)?;
+        let axis = |n: &str| r.range(pkg, n).unwrap_or([0.0, 0.0]);
+        Some([axis("X"), axis("Y"), axis("Z")])
+    }
+
+    /// Dynamic array of tagged structs.
+    pub fn struct_array(&self, pkg: &Package, name: &str) -> Vec<Properties> {
+        let Some(data) = self.raw(pkg, name) else { return Vec::new() };
+        let mut r = Reader::new(data);
+        let Ok(n) = r.compact() else { return Vec::new() };
+        (0..n.max(0)).map_while(|_| Properties::read(pkg, &mut r).ok()).collect()
+    }
 }
+

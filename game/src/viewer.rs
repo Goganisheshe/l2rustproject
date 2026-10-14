@@ -16,7 +16,9 @@ struct Spec(String);
 
 impl Plugin for ViewerPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(Spec(self.spec.clone())).add_systems(Startup, setup).add_systems(Update, orbit);
+        app.insert_resource(Spec(self.spec.clone()))
+            .add_systems(Startup, setup)
+            .add_systems(Update, (orbit, replay_effect));
     }
 }
 
@@ -84,3 +86,38 @@ fn orbit(time: Res<Time>, mut cam: Single<&mut Transform, With<Camera3d>>) {
     cam.translation = Vec3::new(a.sin() * dist, h + dist * 0.15, a.cos() * dist);
     cam.look_at(Vec3::Y * h, Vec3::Y);
 }
+
+/// `L2_EFFECT=<class>` replays one effect class at the origin every 1.5 s,
+/// sweeping it along +X to mimic a projectile.
+#[allow(clippy::too_many_arguments)]
+fn replay_effect(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut timer: Local<f32>,
+    mut lib: ResMut<L2Library>,
+    mut fx: ResMut<crate::effects::EffectCache>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut movers: Query<(Entity, &mut Transform), With<Mover>>,
+) {
+    for (e, mut t) in &mut movers {
+        t.translation.x += 6.0 * time.delta_secs();
+        if t.translation.x > 3.0 {
+            commands.entity(e).despawn();
+        }
+    }
+    let Ok(class) = std::env::var("L2_EFFECT") else { return };
+    *timer -= time.delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = 1.5;
+    let Some(asset) = fx.load(&mut lib, &class, &mut meshes, &mut materials, &mut images) else { return };
+    let start = Transform::from_xyz(-3.0, 1.0, 0.0);
+    let mover = commands.spawn((Mover, start, Visibility::default())).id();
+    crate::effects::spawn_effect(&mut commands, &asset, start, Some(mover));
+}
+
+#[derive(Component)]
+struct Mover;

@@ -2,6 +2,7 @@
 
 mod input;
 mod character;
+mod effects;
 mod l2assets;
 mod skinned;
 mod survivor;
@@ -15,7 +16,7 @@ fn main() {
         primary_window: Some(Window { title: "L2 Survivor".into(), ..default() }),
         ..default()
     }))
-    .add_plugins((input::InputPlugin, l2assets::L2AssetsPlugin, skinned::SkinnedPlugin))
+    .add_plugins((input::InputPlugin, l2assets::L2AssetsPlugin, skinned::SkinnedPlugin, effects::EffectsPlugin))
     .add_systems(Update, debug_screenshot);
     match std::env::var("L2_MODEL") {
         Ok(spec) => app.add_plugins(viewer::ViewerPlugin { spec }),

@@ -41,6 +41,8 @@ Environment variables:
   assembled player character. Several meshes can be joined with `+`, and
   `mesh@package/material` forces a material. `L2_VIEW_ANGLE`, `L2_VIEW_DIST`,
   `L2_VIEW_HEIGHT` fix the camera.
+- `L2_EFFECT=<effect class>` — with `L2_MODEL`, replay an effect every 1.5 s
+  sweeping along +X, e.g. `el_wind_strike_fl`.
 - `L2_VIEW=<package>:<static mesh>` — place one static mesh next to the start.
 - `L2_SCREENSHOT=<file.png>` — save a frame after `L2_SCREENSHOT_AT` seconds
   (default 8) and quit. `L2_AUTOPILOT=1` walks the player in a circle.
@@ -93,3 +95,9 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   without a material; the texture is `lineageweaponstex.<name>_t00_wp`. They
   hang rigidly on the character bone `Weapon_R_Bone` (`Shield_L_Bone` exists
   for shields).
+- Skill effects are `Emitter` subclasses in `system/lineageeffect*.u` and
+  `lineageskilleffect.u` (e.g. `el_wind_strike_ca/fl/ta` = cast/flight/target).
+  Their SpriteEmitter/MeshEmitter subobjects hold tagged properties; non-native
+  structs (`Range`, `RangeVector`, array elements) are nested tagged streams,
+  native ones (`Vector`, `Color`) are raw. `game/src/effects.rs` plays sprite and
+  mesh emitters (beams/trails are skipped).

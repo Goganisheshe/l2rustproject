@@ -12,6 +12,8 @@ fn main() -> Result<()> {
         Some("materials") => materials(&args[2], &args[3], &args[4]),
         Some("bones") => skel_bones(&args[2], &args[3], &args[4]),
         Some("alpha") => mat_alpha(&args[2], &args[3], &args[4]),
+        Some("props") => dump_props(&args[2], &args[3]),
+        Some("effect") => dump_effect(&args[2], &args[3]),
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
@@ -284,6 +286,62 @@ pub fn mat_alpha(client: &str, package: &str, material: &str) -> Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Dumps the tagged properties of one export (`Outer.Name` or name).
+pub fn dump_props(path: &str, object: &str) -> Result<()> {
+    let pkg = Package::open(path)?;
+    let idx = pkg.find_export(object).with_context(|| format!("no export {object}"))?;
+    let mut r = ue2::Reader::new(pkg.export_data(idx));
+    let props = ue2::props::Properties::read(&pkg, &mut r)?;
+    println!("{} ({}), {} bytes after properties", object, pkg.class_name(&pkg.exports[idx]), r.remaining());
+    for p in &props.0 {
+        let v = match &p.value {
+            ue2::props::Value::Object(o) => format!("Object {}", pkg.full_name(ue2::ObjectRef::from_raw(*o))),
+            ue2::props::Value::Name(n) => format!("Name {}", pkg.name(*n)),
+            ue2::props::Value::Raw { kind, name, data } => {
+                let floats: Vec<String> = data
+                    .chunks_exact(4)
+                    .map(|c| format!("{:.3}", f32::from_le_bytes(c.try_into().unwrap())))
+                    .collect();
+                format!(
+                    "Raw kind {kind} struct {} [{}] floats({})",
+                    name.map(|n| pkg.name(n).to_string()).unwrap_or_default(),
+                    data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+                    floats.join(", ")
+                )
+            }
+            v => format!("{v:?}"),
+        };
+        println!("  {}[{}] = {v}", pkg.name(p.name), p.index);
+    }
+    Ok(())
+}
+
+/// Prints the decoded emitters of an effect class.
+pub fn dump_effect(path: &str, class: &str) -> Result<()> {
+    let pkg = Package::open(path)?;
+    let emitters = ue2::effect::read_effect(&pkg, class).with_context(|| format!("no effect {class}"))?;
+    for e in emitters {
+        println!(
+            "{} {:?} tex={} mesh={} max={} respawn={} rate={} life={:?} size={:?} style={} vel={:?} acc={:?} sizescale={:?} colors={}",
+            e.name,
+            e.kind,
+            pkg.full_name(e.texture),
+            pkg.full_name(e.static_mesh),
+            e.max_particles,
+            e.respawn,
+            e.rate,
+            e.lifetime,
+            e.start_size,
+            e.draw_style,
+            e.velocity,
+            e.acceleration,
+            e.size_scale,
+            e.color_scale.len()
+        );
     }
     Ok(())
 }

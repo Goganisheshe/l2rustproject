@@ -15,6 +15,22 @@ use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use crate::character::{find_class, part_spec, CLASSES};
 use crate::l2assets::{L2Library, L2Textures};
 use crate::character::weapon_spec;
+use crate::effects::{spawn_effect, EffectAsset, EffectCache};
+
+/// Skill effects from the client: (cast for fighters, cast for mystics,
+/// projectile flight, impact).
+const FX_CAST_FIGHTER: &str = "soul_N_stick";
+const FX_CAST_MYSTIC: &str = "el_wind_strike_ca";
+const FX_FLIGHT: &str = "el_wind_strike_fl";
+const FX_HIT: &str = "el_wind_strike_ta";
+
+#[derive(Resource, Default)]
+struct Fx {
+    cast_fighter: Option<Arc<EffectAsset>>,
+    cast_mystic: Option<Arc<EffectAsset>>,
+    flight: Option<Arc<EffectAsset>>,
+    hit: Option<Arc<EffectAsset>>,
+}
 use crate::skinned::{spawn_model, Animated, Attachment, Model, ModelCache};
 
 
@@ -289,7 +305,17 @@ fn setup_world(
     mut images: ResMut<Assets<Image>>,
     mut cache: ResMut<ModelCache>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    mut fx_cache: ResMut<EffectCache>,
 ) {
+    let mut load_fx = |name: &str| fx_cache.load(&mut lib, name, &mut meshes, &mut materials, &mut images);
+    let fx = Fx {
+        cast_fighter: load_fx(FX_CAST_FIGHTER),
+        cast_mystic: load_fx(FX_CAST_MYSTIC),
+        flight: load_fx(FX_FLIGHT),
+        hit: load_fx(FX_HIT),
+    };
+    commands.insert_resource(fx);
+
     // Characters from the client's skeletal meshes.
     let mut roster = Roster::default();
     for &(p, m, hp, speed, unlock) in ENEMY_KINDS {
@@ -360,7 +386,7 @@ fn setup_world(
     commands.insert_resource(Palette {
         enemy_mesh: meshes.add(Capsule3d::new(ENEMY_RADIUS, 0.8)),
         enemy_mat: materials.add(Color::srgb(0.6, 0.15, 0.15)),
-        bolt_mesh: meshes.add(Sphere::new(0.18)),
+        bolt_mesh: meshes.add(Sphere::new(0.1)),
         bolt_mat: materials.add(StandardMaterial {
             base_color: Color::srgb(0.6, 0.85, 1.0),
             emissive: LinearRgba::rgb(2.0, 4.0, 8.0),
@@ -558,9 +584,12 @@ fn fire_bolts(
     time: Res<Time>,
     mut run: ResMut<Run>,
     palette: Res<Palette>,
-    player: Single<&Transform, With<Player>>,
+    fx: Res<Fx>,
+    select: Res<SelectState>,
+    player: Single<(Entity, &Transform), With<Player>>,
     enemies: Query<&Transform, With<Enemy>>,
 ) {
+    let (player_entity, player) = player.into_inner();
     run.bolt_timer -= time.delta_secs();
     if run.bolt_timer > 0.0 {
         return;
@@ -575,17 +604,31 @@ fn fire_bolts(
     run.bolt_timer = run.bolt_cooldown;
     let aim = (nearest.translation - origin).with_y(0.0).normalize_or_zero();
     run.swing = Some(aim);
+    let mystic = CLASSES.get(select.index).is_some_and(|c| c.prefix.contains("Magic") || c.prefix.contains("Shaman"));
+    let cast = if mystic { &fx.cast_mystic } else { &fx.cast_fighter };
+    if let Some(cast) = cast {
+        spawn_effect(&mut commands, cast, Transform::default(), Some(player_entity));
+    }
     let n = run.bolt_count;
     for i in 0..n {
         let spread = (i as f32 - (n - 1) as f32 / 2.0) * 0.18;
         let dir = Quat::from_rotation_y(spread) * aim;
-        commands.spawn((
-            RunEntity,
-            Projectile { velocity: dir * 14.0, damage: run.bolt_damage, pierce: run.bolt_pierce, life: 1.6 },
-            Mesh3d(palette.bolt_mesh.clone()),
-            MeshMaterial3d(palette.bolt_mat.clone()),
-            Transform::from_translation(origin + Vec3::Y * 1.0),
-        ));
+        let mut transform = Transform::from_translation(origin + Vec3::Y * 1.0);
+        face(&mut transform, dir);
+        let bolt = commands
+            .spawn((
+                RunEntity,
+                Projectile { velocity: dir * 14.0, damage: run.bolt_damage, pierce: run.bolt_pierce, life: 1.6 },
+                transform,
+                Visibility::default(),
+            ))
+            .id();
+        // A small glowing core keeps bolts readable over bright ground; the
+        // client's Wind Strike trail flies around it.
+        commands.entity(bolt).insert((Mesh3d(palette.bolt_mesh.clone()), MeshMaterial3d(palette.bolt_mat.clone())));
+        if let Some(flight) = &fx.flight {
+            spawn_effect(&mut commands, flight, transform, Some(bolt));
+        }
     }
 }
 
@@ -594,6 +637,7 @@ fn move_bolts(
     time: Res<Time>,
     mut run: ResMut<Run>,
     palette: Res<Palette>,
+    fx: Res<Fx>,
     mut bolts: Query<(Entity, &mut Projectile, &mut Transform), Without<Enemy>>,
     mut enemies: Query<(Entity, &mut Enemy, &Transform)>,
 ) {
@@ -608,6 +652,11 @@ fn move_bolts(
                     continue;
                 }
                 enemy.hp -= bolt.damage;
+                if let Some(hit) = &fx.hit {
+                    let mut at = Transform::from_translation(et.translation + Vec3::Y * 0.9);
+                    face(&mut at, -bolt.velocity);
+                    spawn_effect(&mut commands, hit, at, None);
+                }
                 if enemy.hp <= 0.0 {
                     kill(&mut commands, &mut run, &palette, e, et.translation);
                 }

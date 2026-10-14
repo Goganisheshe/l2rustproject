@@ -2,6 +2,7 @@
 
 pub mod anim;
 pub mod crypt;
+pub mod effect;
 pub mod library;
 pub mod mesh;
 pub mod package;
