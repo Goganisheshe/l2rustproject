@@ -106,6 +106,8 @@ pub struct Player<'a> {
     pub spawns: Vec<(u32, [f32; 3])>,
     /// Remove the NPC being talked to.
     pub despawn_npc: bool,
+    /// Where the monster being reported to `on_kill` died (Unreal units).
+    pub kill_pos: [f32; 3],
 }
 
 impl Player<'_> {

@@ -318,6 +318,7 @@ fn run_bypass(
         class_change: false,
         spawns: Vec::new(),
         despawn_npc: false,
+        kill_pos: [0.0; 3],
     };
     let page = execute(&cmd, npc, &pages, &quests, &mut qlog, &mut p);
     let (teleport, msg, class_change) = (p.teleport, p.screen.take(), p.class_change);
@@ -479,8 +480,9 @@ fn quest_kills(
     dp: Res<Datapack>,
     mut log: ResMut<Log>,
     mut screen: ResMut<ScreenMsg>,
+    mut spawn_req: ResMut<crate::rpg::SpawnRequests>,
     hero: Single<(&Hero, &mut HeroStats, &mut Inventory)>,
-    mut npcs: Query<&mut Npc>,
+    mut npcs: Query<(&mut Npc, &Transform)>,
 ) {
     let (hero, mut stats, mut inv) = hero.into_inner();
     let mut p = Player {
@@ -495,14 +497,17 @@ fn quest_kills(
         class_change: false,
         spawns: Vec::new(),
         despawn_npc: false,
+        kill_pos: [0.0; 3],
     };
-    for mut npc in &mut npcs {
+    for (mut npc, tr) in &mut npcs {
         if npc.state != NpcState::Dead || npc.quest_seen {
             continue;
         }
         npc.quest_seen = true;
+        p.kill_pos = crate::streaming::bevy_to_ue(tr.translation);
         quest::kill(&quests, &mut qlog, &mut p, npc.template.id);
     }
+    spawn_req.0.append(&mut p.spawns);
     if let Some(m) = p.screen.take() {
         screen.text = m;
         screen.timer = 6.0;
