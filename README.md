@@ -39,8 +39,13 @@ teleports and the quest pages. What is playable:
   asks); only `autoGet` skills come by themselves. Clicking a learned active
   skill puts it on the hotbar or takes it off. `L2_SKILL_WINDOW=1` opens it. Monsters and bosses use
   the offensive skills of their datapack `skillList`.
-- Items: starting kit, equipment stats, drops with auto-loot; inventory on I /
-  gamepad Select (Enter / A equips or uses). Equipped armor and weapons
+- Items: starting kit, equipment stats; monster drops fall on the ground with
+  the client's drop models (click one or press Z / gamepad Y to pick up;
+  `L2_AUTOLOOT=1` loots directly). Inventory on I / gamepad Select (Enter / A
+  equips or uses; on soulshots / spiritshots it toggles auto-use, which
+  doubles attack or spell damage per shot; the Classic universal shots fit
+  any weapon grade).
+- V sits down / stands up: 1.5x HP/MP regeneration. Equipped armor and weapons
   change the hero's model (client `armorgrp` / `weapongrp`), weapons switch
   the animation stance. Scrolls of escape / teleport and potions work.
 - NPCs: F / X or a second click on a friendly NPC walks up and opens its
@@ -61,7 +66,8 @@ teleports and the quest pages. What is playable:
 Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
 `L2_DEBUG_NPC=1`, `L2_START="x,y,z"`, `L2_LEVEL=<n>`, `L2_CLASS_PICK=<i>`,
 `L2_TALK=<npc id>` with `L2_BYPASS="cmd|cmd"`, `L2_CONTINUE=1`,
-`L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`.
+`L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`, `L2_MOVE_TO=dx,dz`, `L2_AUTOSHOTS=1`,
+`L2_SIT=1`, `L2_GROUNDLOOT=1` (with `L2_AUTOFIGHT`).
 
 Monsters behave like on the server: only those flagged aggressive in the
 datapack attack on sight, the rest stroll around their spawn point until

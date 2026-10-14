@@ -32,6 +32,8 @@ pub struct SaveGame {
     pub respawn: [f32; 3],
     pub items: BTreeMap<u32, u64>,
     pub equipped: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub auto_shots: Vec<u32>,
     pub skills: BTreeMap<u32, u32>,
     pub hotbar: Vec<u32>,
     /// quest id -> (state 0 created / 1 started / 2 completed, cond, vars).
@@ -136,7 +138,11 @@ fn restore(
     stats.recalc();
     stats.hp = save.hp.min(stats.max_hp).max(1.0);
     stats.mp = save.mp.min(stats.max_mp);
-    let restored = Inventory { items: save.items.clone(), equipped: save.equipped.clone() };
+    let restored = Inventory {
+        items: save.items.clone(),
+        equipped: save.equipped.clone(),
+        auto_shots: save.auto_shots.iter().copied().collect(),
+    };
     match inv {
         Some(mut inv) => *inv = restored,
         None => {
@@ -180,6 +186,7 @@ pub fn snapshot(
         respawn: bevy_to_ue(stats.respawn),
         items: inv.map(|i| i.items.clone()).unwrap_or_default(),
         equipped: inv.map(|i| i.equipped.clone()).unwrap_or_default(),
+        auto_shots: inv.map(|i| i.auto_shots.iter().copied().collect()).unwrap_or_default(),
         skills: skills.map(|s| s.learned.clone()).unwrap_or_default(),
         hotbar: skills.map(|s| s.hotbar.clone()).unwrap_or_default(),
         quests: qlog

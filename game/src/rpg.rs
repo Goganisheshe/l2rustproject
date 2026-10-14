@@ -82,6 +82,8 @@ pub struct HeroStats {
     pub mp_regen: f32,
     pub atk_timer: f32,
     pub attacking: bool,
+    /// Sitting down (V): faster regeneration, no moving.
+    pub sitting: bool,
     pub dead_timer: f32,
     /// Where the hero returns after death (the starting village).
     pub respawn: Vec3,
@@ -135,6 +137,7 @@ impl HeroStats {
             mp_regen: 1.0,
             atk_timer: 0.0,
             attacking: false,
+            sitting: false,
             dead_timer: 0.0,
             respawn: Vec3::ZERO,
             buffs: Vec::new(),
@@ -565,11 +568,12 @@ fn hero_attack(
     dp: Res<Datapack>,
     mut target: ResMut<Target>,
     mut log: ResMut<Log>,
-    hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
+    items: Res<crate::items::ItemData>,
+    hero: Single<(&Hero, &mut Transform, &mut HeroStats, Option<&mut crate::items::Inventory>)>,
     mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
 ) {
-    let (hero, mut tr, mut stats) = hero.into_inner();
+    let (hero, mut tr, mut stats, inv) = hero.into_inner();
     let dt = time.delta_secs();
     stats.atk_timer -= dt;
     if stats.hp <= 0.0 || !stats.attacking || input.move_dir.length() > 0.1 {
@@ -616,7 +620,8 @@ fn hero_attack(
         a.restart(&hero.clips("Atk01", "atk01").each_ref().map(String::as_str), false);
     }
     let mut rng = rand::rng();
-    let (dmg, crit) = damage(stats.patk, npc.template.pdef, &mut rng);
+    let ss = inv.map_or(1.0, |mut i| crate::items::use_shot(&mut i, &items, false));
+    let (dmg, crit) = damage(stats.patk * ss, npc.template.pdef, &mut rng);
     npc.hp -= dmg;
     npc.provoked = true;
     log.push(format!("You hit {} for {:.0}{}", npc.template.name, dmg, if crit { " (critical)" } else { "" }));
@@ -893,8 +898,10 @@ fn hero_regen_and_death(
         }
         return;
     }
-    stats.hp = (stats.hp + stats.hp_regen * dt * 0.5).min(stats.max_hp);
-    stats.mp = (stats.mp + stats.mp_regen * dt * 0.5).min(stats.max_mp);
+    // Sitting regenerates 1.5x faster, as in the client.
+    let rate = if stats.sitting { 0.75 } else { 0.5 };
+    stats.hp = (stats.hp + stats.hp_regen * dt * rate).min(stats.max_hp);
+    stats.mp = (stats.mp + stats.mp_regen * dt * rate).min(stats.max_mp);
 }
 
 // ---------------------------------------------------------------------------

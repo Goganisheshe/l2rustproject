@@ -194,12 +194,13 @@ fn run_cast(
     mut lib: ResMut<L2Library>,
     mut cache: ResMut<EffectCache>,
     mut assets: (ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>, ResMut<Assets<Image>>),
-    hero: Single<(Entity, &Hero, &mut Transform, &mut HeroStats, &mut HeroSkills)>,
+    items: Res<crate::items::ItemData>,
+    hero: Single<(Entity, &Hero, &mut Transform, &mut HeroStats, &mut HeroSkills, Option<&mut crate::items::Inventory>)>,
     mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
 ) {
     let dt = time.delta_secs();
-    let (hero_e, hero, mut tr, mut stats, mut skills) = hero.into_inner();
+    let (hero_e, hero, mut tr, mut stats, mut skills, inv) = hero.into_inner();
     for c in skills.cooldowns.values_mut() {
         *c -= dt;
     }
@@ -256,7 +257,9 @@ fn run_cast(
         for spec in visual.iter().flat_map(|v| v.explosion.iter()) {
             fx(&spec.class, Transform::from_translation(at_target + Vec3::Y + spec.offset), None);
         }
-        apply_effects(&def, cast.level, cast.target, &mut stats, &mut npcs, &dp, &mut log);
+        // Soulshots power physical skills, spiritshots magic.
+        let shot = inv.map_or(1.0, |mut i| crate::items::use_shot(&mut i, &items, visual.as_ref().is_some_and(|v| v.magic)));
+        apply_effects(&def, cast.level, cast.target, &mut stats, &mut npcs, &dp, &mut log, shot);
     }
     if cast.time >= cast.total {
         let reuse = def.reuse.max(0.5);
@@ -274,6 +277,7 @@ fn apply_effects(
     npcs: &mut Query<(&mut Npc, &Transform), Without<Hero>>,
     dp: &Datapack,
     log: &mut Log,
+    shot: f32,
 ) {
     let mut rng = rand::rng();
     for e in &def.effects {
@@ -282,11 +286,11 @@ fn apply_effects(
             "PhysicalDamage" | "MagicalDamage" => {
                 let Some((mut npc, _)) = target.and_then(|t| npcs.get_mut(t).ok()) else { continue };
                 let dmg = if e.name == "PhysicalDamage" {
-                    let (d, _) = crate::rpg::damage(stats.patk + power, npc.template.pdef, &mut rng);
+                    let (d, _) = crate::rpg::damage((stats.patk + power) * shot, npc.template.pdef, &mut rng);
                     d
                 } else {
                     // Lineage magic: 91 * sqrt(M.Atk) * power / M.Def.
-                    91.0 * stats.matk.max(1.0).sqrt() * power / npc.template.mdef.max(1.0) * rng.random_range(0.9..1.1)
+                    91.0 * stats.matk.max(1.0).sqrt() * power / npc.template.mdef.max(1.0) * rng.random_range(0.9..1.1) * shot
                 };
                 npc.hp -= dmg;
                 npc.provoked = true;

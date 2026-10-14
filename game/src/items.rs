@@ -31,6 +31,13 @@ pub struct ItemTemplate {
     pub skills: Vec<u32>,
     /// Shop price in Adena.
     pub price: u64,
+    /// Crystal grade (NONE, D, C, B, A, S).
+    pub grade: String,
+    /// Shots a weapon burns per attack / per spell.
+    pub soulshots: u64,
+    pub spiritshots: u64,
+    /// SoulShots, SpiritShot or BlessedSpiritShot for shot items.
+    pub handler: String,
     pub stats: HashMap<String, f32>,
 }
 
@@ -83,6 +90,35 @@ pub struct Inventory {
     pub items: BTreeMap<u32, u64>,
     /// slot -> item id.
     pub equipped: BTreeMap<String, u32>,
+    /// Shots set to auto-use (right-click in the client's inventory).
+    pub auto_shots: std::collections::BTreeSet<u32>,
+}
+
+/// The Classic universal shots work with any weapon grade.
+const UNIVERSAL_SHOTS: [u32; 2] = [91927, 91928];
+
+/// Burns the auto-use shot for the equipped weapon: returns the damage
+/// multiplier (soulshot x2 for attacks and physical skills; spiritshot x2,
+/// blessed x2.2 for magic), or 1 without a matching charged shot.
+pub fn use_shot(inv: &mut Inventory, data: &ItemData, magic: bool) -> f32 {
+    let Some(weapon) = inv.equipped.get("rhand").and_then(|w| data.items.get(w)) else { return 1.0 };
+    let need = if magic { weapon.spiritshots } else { weapon.soulshots }.max(1);
+    let pick = inv.auto_shots.iter().copied().find(|id| {
+        let Some(t) = data.items.get(id) else { return false };
+        let kind_ok = if magic { t.handler == "SpiritShot" || t.handler == "BlessedSpiritShot" } else { t.handler == "SoulShots" };
+        kind_ok && (UNIVERSAL_SHOTS.contains(id) || t.grade == weapon.grade) && inv.items.get(id).copied().unwrap_or(0) >= need
+    });
+    let Some(id) = pick else { return 1.0 };
+    let left = inv.items.get_mut(&id).unwrap();
+    *left -= need;
+    if *left == 0 {
+        inv.items.remove(&id);
+        inv.auto_shots.remove(&id);
+    }
+    match data.items.get(&id).map(|t| t.handler.as_str()) {
+        Some("BlessedSpiritShot") => 2.2,
+        _ => 2.0,
+    }
 }
 
 pub struct ItemsPlugin;
@@ -152,6 +188,10 @@ fn load_items(mut data: ResMut<ItemData>) {
                     bodypart: set("bodypart"),
                     weapon_type: set("weapon_type"),
                     price: set("price").parse().unwrap_or(0),
+                    grade: Some(set("crystal_type")).filter(|g| !g.is_empty()).unwrap_or_else(|| "NONE".into()),
+                    soulshots: set("soulshots").parse().unwrap_or(0),
+                    spiritshots: set("spiritshots").parse().unwrap_or(0),
+                    handler: set("handler"),
                     skills: n
                         .children()
                         .filter(|c| c.has_tag_name("skills"))
@@ -258,6 +298,12 @@ pub fn give_starting_items(
         if let (true, Some(t)) = (equipped, data.items.get(&item)) {
             inv.equipped.insert(t.slot().to_string(), item);
         }
+    }
+    // L2_AUTOSHOTS=1 turns on every shot of the kit (tests).
+    if std::env::var_os("L2_AUTOSHOTS").is_some() {
+        inv.items.insert(91927, 1000);
+        inv.items.insert(91928, 1000);
+        inv.auto_shots = inv.items.keys().copied().filter(|i| data.items.get(i).is_some_and(|t| t.handler.contains("Shot"))).collect();
     }
     commands.entity(e).insert(inv);
 }
@@ -499,7 +545,15 @@ fn inventory_window(
     // Equip / unequip with Enter or gamepad A (not while toggling).
     if input.confirm && !toggle {
         let (id, _) = list[ui.selected];
-        if data.items.get(&id).is_some_and(|t| !t.equippable() && !t.skills.is_empty()) {
+        if data.items.get(&id).is_some_and(|t| t.handler.contains("Shot")) {
+            // Shots toggle auto-use.
+            if !inv.auto_shots.remove(&id) {
+                inv.auto_shots.insert(id);
+                log.push(format!("Automatic use of {} has been activated.", data.items[&id].name));
+            } else {
+                log.push(format!("Automatic use of {} has been deactivated.", data.items[&id].name));
+            }
+        } else if data.items.get(&id).is_some_and(|t| !t.equippable() && !t.skills.is_empty()) {
             uses.0.push(id);
         } else if let Some(t) = data.items.get(&id).filter(|t| t.equippable()) {
             let slot = t.slot().to_string();
@@ -513,7 +567,7 @@ fn inventory_window(
         }
         ui.shown = None;
     }
-    let state = (ui.selected, list.len(), list.iter().map(|x| x.1).sum::<u64>() + inv.equipped.len() as u64);
+    let state = (ui.selected, list.len(), list.iter().map(|x| x.1).sum::<u64>() + inv.equipped.len() as u64 + 1000 * inv.auto_shots.len() as u64);
     if ui.shown == Some(state) {
         return;
     }
@@ -551,7 +605,13 @@ fn inventory_window(
                         lib.texture(pk, o, false).map(|img| images.add(img))
                     })
                     .clone();
-                let mark = if equipped.contains(id) { " [E]" } else { "" };
+                let mark = if equipped.contains(id) {
+                    " [E]"
+                } else if inv.auto_shots.contains(id) {
+                    " [auto]"
+                } else {
+                    ""
+                };
                 let color = if i == ui.selected { Color::srgb(1.0, 0.85, 0.3) } else { Color::WHITE };
                 p.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
                     if let Some(img) = icon {

@@ -374,6 +374,7 @@ fn enter_world(
     let template = dp.classes.get(template_for(class.prefix)).cloned().unwrap_or_default();
     let mut stats = HeroStats::new(template);
     stats.respawn = pos;
+    stats.sitting = std::env::var_os("L2_SIT").is_some();
     stats.class_key = template_for(class.prefix).to_string();
     // L2_LEVEL=<n> starts at that level (tests).
     if let Some(l) = std::env::var("L2_LEVEL").ok().and_then(|v| v.parse::<u32>().ok()) {
@@ -410,13 +411,42 @@ fn move_hero(
     streamer: Res<TileStreamer>,
     world: Res<CollisionWorld>,
     mut target: ResMut<MoveTarget>,
-    hero: Single<(&Hero, &mut Transform, &HeroStats)>,
+    hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
     mut anims: Query<&mut Animated>,
 ) {
-    let (hero, mut tr, stats) = hero.into_inner();
+    let (hero, mut tr, mut stats) = hero.into_inner();
     if stats.hp <= 0.0 {
         target.0 = None;
+        stats.sitting = false;
         return;
+    }
+    // V sits down / stands up; moving or fighting stands up.
+    if keys.just_pressed(KeyCode::KeyV) {
+        stats.sitting = !stats.sitting;
+        if stats.sitting {
+            target.0 = None;
+            stats.attacking = false;
+            if let Ok(mut a) = anims.get_mut(hero.actor) {
+                a.restart(&["Sit"], false);
+            }
+        } else if let Ok(mut a) = anims.get_mut(hero.actor) {
+            a.restart(&["Stand"], false);
+        }
+    }
+    if stats.sitting {
+        if input.move_dir.length() > 0.1 || stats.attacking || target.0.is_some() {
+            stats.sitting = false;
+            if let Ok(mut a) = anims.get_mut(hero.actor) {
+                a.restart(&["Stand"], false);
+            }
+        } else {
+            if let Ok(mut a) = anims.get_mut(hero.actor) {
+                if a.finished() || a.looping {
+                    a.play(&["SitWait"], true);
+                }
+            }
+            return;
+        }
     }
     let mut d = input.move_dir;
     let walking = keys.pressed(KeyCode::ShiftLeft);
@@ -467,6 +497,14 @@ fn move_hero(
     }
     if stats.attacking && !moving {
         return; // combat drives the animation
+    }
+    // Let the stand-up clip finish before idling.
+    if !moving {
+        if let Ok(a) = anims.get(hero.actor) {
+            if !a.looping && !a.finished() {
+                return;
+            }
+        }
     }
     if let Ok(mut anim) = anims.get_mut(hero.actor) {
         let names = if moving && walking {
