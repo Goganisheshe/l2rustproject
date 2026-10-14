@@ -126,6 +126,7 @@ pub struct ItemsPlugin;
 impl Plugin for ItemsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ItemData>()
+            .init_resource::<ItemClick>()
             .init_resource::<UseQueue>()
             .init_resource::<InventoryUi>()
             .add_systems(PreStartup, load_items)
@@ -526,14 +527,43 @@ fn use_items(
 // ---------------------------------------------------------------------------
 
 #[derive(Resource, Default)]
-struct InventoryUi {
-    open: bool,
+pub struct InventoryUi {
+    pub open: bool,
     selected: usize,
     shown: Option<(usize, usize, u64)>,
 }
 
 #[derive(Component)]
 struct InventoryRoot;
+
+/// What Enter / a click on an inventory item does: toggle auto-use of
+/// shots, use scrolls and potions, equip or take off equipment.
+pub fn activate_item(id: u32, inv: &mut Inventory, data: &ItemData, log: &mut Log, uses: &mut UseQueue) {
+    if data.items.get(&id).is_some_and(|t| t.handler.contains("Shot")) {
+        // Shots toggle auto-use.
+        if !inv.auto_shots.remove(&id) {
+            inv.auto_shots.insert(id);
+            log.push(format!("Automatic use of {} has been activated.", data.items[&id].name));
+        } else {
+            log.push(format!("Automatic use of {} has been deactivated.", data.items[&id].name));
+        }
+    } else if data.items.get(&id).is_some_and(|t| !t.equippable() && !t.skills.is_empty()) {
+        uses.0.push(id);
+    } else if let Some(t) = data.items.get(&id).filter(|t| t.equippable()) {
+        let slot = t.slot().to_string();
+        if inv.equipped.get(&slot) == Some(&id) {
+            inv.equipped.remove(&slot);
+            log.push(format!("Unequipped {}", t.name));
+        } else {
+            inv.equipped.insert(slot, id);
+            log.push(format!("Equipped {}", t.name));
+        }
+    }
+}
+
+/// An item clicked in the client's inventory window (l2ui).
+#[derive(Resource, Default)]
+pub struct ItemClick(pub Option<u32>);
 
 #[allow(clippy::too_many_arguments)]
 fn inventory_window(
@@ -551,7 +581,13 @@ fn inventory_window(
     roots: Query<Entity, With<InventoryRoot>>,
     mut uses: ResMut<UseQueue>,
     mut opened_by_env: Local<bool>,
+    mut click: ResMut<ItemClick>,
+    iface: Option<Res<crate::l2ui::Interface>>,
 ) {
+    if let Some(id) = click.0.take() {
+        activate_item(id, &mut inv, &data, &mut log, &mut uses);
+        ui.shown = None;
+    }
     // L2_INVENTORY=1 opens the window at start (screenshots).
     if !*opened_by_env && std::env::var_os("L2_INVENTORY").is_some() {
         *opened_by_env = true;
@@ -562,7 +598,8 @@ fn inventory_window(
         ui.open = !ui.open;
         ui.shown = None;
     }
-    if !ui.open {
+    // The client's InventoryWnd (l2ui_windows) draws the window.
+    if !ui.open || iface.is_some() {
         for e in &roots {
             commands.entity(e).despawn();
         }
@@ -579,26 +616,7 @@ fn inventory_window(
     // Equip / unequip with Enter or gamepad A (not while toggling).
     if input.confirm && !toggle {
         let (id, _) = list[ui.selected];
-        if data.items.get(&id).is_some_and(|t| t.handler.contains("Shot")) {
-            // Shots toggle auto-use.
-            if !inv.auto_shots.remove(&id) {
-                inv.auto_shots.insert(id);
-                log.push(format!("Automatic use of {} has been activated.", data.items[&id].name));
-            } else {
-                log.push(format!("Automatic use of {} has been deactivated.", data.items[&id].name));
-            }
-        } else if data.items.get(&id).is_some_and(|t| !t.equippable() && !t.skills.is_empty()) {
-            uses.0.push(id);
-        } else if let Some(t) = data.items.get(&id).filter(|t| t.equippable()) {
-            let slot = t.slot().to_string();
-            if inv.equipped.get(&slot) == Some(&id) {
-                inv.equipped.remove(&slot);
-                log.push(format!("Unequipped {}", t.name));
-            } else {
-                inv.equipped.insert(slot, id);
-                log.push(format!("Equipped {}", t.name));
-            }
-        }
+        activate_item(id, &mut inv, &data, &mut log, &mut uses);
         ui.shown = None;
     }
     let state = (ui.selected, list.len(), list.iter().map(|x| x.1).sum::<u64>() + inv.equipped.len() as u64 + 1000 * inv.auto_shots.len() as u64);

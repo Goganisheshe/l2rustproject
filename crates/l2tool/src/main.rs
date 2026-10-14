@@ -23,7 +23,23 @@ fn main() -> Result<()> {
                 if depth > max {
                     return;
                 }
-                println!("{}{} [{}] {}x{} at {:?} {},{} tex {}", "  ".repeat(depth), e.name(), e.class, e.int("width"), e.int("height"), e.str("relativeTo"), e.float("x"), e.float("y"), [e.str("file"), e.str("backTex"), e.str("normalTex"), e.str("foreTex")].concat());
+                println!(
+                    "{}{} [{}] {}x{} at {:?} {},{} tex {} type {} uv {},{} {}x{}",
+                    "  ".repeat(depth),
+                    e.name(),
+                    e.class,
+                    e.int("width"),
+                    e.int("height"),
+                    e.str("relativeTo"),
+                    e.float("x"),
+                    e.float("y"),
+                    [e.str("file"), e.str("backTex"), e.str("normalTex"), e.str("foreTex")].concat(),
+                    e.int("type"),
+                    e.float("u"),
+                    e.float("v"),
+                    e.float("uSize"),
+                    e.float("vSize")
+                );
                 for c in e.children() {
                     dump(c, depth + 1, max);
                 }

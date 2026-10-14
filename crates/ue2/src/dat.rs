@@ -519,3 +519,16 @@ pub fn parse_etcitemgrp(data: &[u8], names: &GameDataNames) -> Result<Vec<(u32, 
     }
     Ok(out)
 }
+
+/// Parses `sysstring-*.dat`: UI strings by id (window titles, labels).
+pub fn parse_sysstring(data: &[u8]) -> Result<HashMap<u32, String>, Error> {
+    let mut r = Reader::new(data);
+    let n = r.u32()? as usize;
+    let mut out = HashMap::with_capacity(n);
+    for _ in 0..n {
+        let id = r.u32()?;
+        let s = ascf(&mut r)?;
+        out.insert(id, s);
+    }
+    Ok(out)
+}

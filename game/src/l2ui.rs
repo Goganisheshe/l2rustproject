@@ -15,7 +15,14 @@ use crate::l2assets::L2Library;
 const DEFAULT_CLIENT_DIR: &str = "G:/visery/l2-client";
 
 #[derive(Resource, Clone)]
-pub struct Interface(pub Arc<Xdat>);
+pub struct Interface(pub Arc<Xdat>, pub Arc<HashMap<u32, String>>);
+
+impl Interface {
+    /// A `sysstring` entry (UI labels, window titles).
+    pub fn string(&self, id: i32) -> Option<&str> {
+        (id > 0).then(|| self.1.get(&(id as u32)).map(String::as_str)).flatten()
+    }
+}
 
 /// Loaded UI textures by xdat name (`L2UI_CT1.Windows.Windows_DF_Small_Bg`).
 #[derive(Resource, Default)]
@@ -79,6 +86,22 @@ pub struct BarFill {
 #[derive(Component)]
 pub struct CtrlText;
 
+/// Icon grid of an ItemWindow: where slot `i` goes.
+#[derive(Component, Clone, Copy)]
+pub struct ItemGrid {
+    pub cols: u32,
+    pub icon: Vec2,
+    pub gap: Vec2,
+    pub offset: Vec2,
+}
+
+impl ItemGrid {
+    pub fn slot(&self, i: u32) -> Vec2 {
+        let (c, r) = (i % self.cols.max(1), i / self.cols.max(1));
+        self.offset + Vec2::new(c as f32 * (self.icon.x + self.gap.x), r as f32 * (self.icon.y + self.gap.y))
+    }
+}
+
 pub struct L2UiPlugin;
 
 impl Plugin for L2UiPlugin {
@@ -91,8 +114,13 @@ fn load_interface(mut commands: Commands) {
     let root = std::env::var_os("L2_CLIENT_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| DEFAULT_CLIENT_DIR.into());
     match std::fs::read(root.join("system/interface.xdat")).map_err(|e| e.to_string()).and_then(|d| ue2::xdat::parse(&d).map_err(|e| e.to_string())) {
         Ok(x) => {
-            info!("interface.xdat: {} windows", x.windows.len());
-            commands.insert_resource(Interface(Arc::new(x)));
+            let sys = root.join("system");
+            let strings = ["sysstring-ru.dat", "sysstring-e.dat"]
+                .iter()
+                .find_map(|f| ue2::dat::read_dat(sys.join(f)).ok().and_then(|d| ue2::dat::parse_sysstring(&d).ok()))
+                .unwrap_or_default();
+            info!("interface.xdat: {} windows, {} sysstrings", x.windows.len(), strings.len());
+            commands.insert_resource(Interface(Arc::new(x), Arc::new(strings)));
         }
         Err(e) => warn!("interface.xdat: {e}"),
     }
@@ -130,6 +158,7 @@ fn size_of(e: &Element, parent: Rect) -> Vec2 {
         // Item slots default to one icon; other controls fill the parent.
         return match e.class.as_str() {
             "ShortcutItemWindow" => Vec2::splat(36.0),
+            "ItemWindow" => Vec2::splat(34.0),
             _ => Vec2::new(parent.w, parent.h),
         };
     }
@@ -169,8 +198,10 @@ fn layout(win: &Element, root: Rect, hide: &dyn Fn(&str) -> bool, out: &mut Vec<
             };
             let r = Rect { x: pos.x, y: pos.y, w: size.x, h: size.y };
             rects.insert(e.name().to_ascii_lowercase(), r);
-            // Hidden controls take their whole subtree with them.
-            if hide(e.name()) || (e.class == "Window" && e.flag("hidden")) {
+            // Hidden controls take their whole subtree with them. Sub-windows
+            // the client's scripts show are asked for as `show:<name>`.
+            let script_shown = || hide(&format!("show:{}", e.name()));
+            if hide(e.name()) || (e.class == "Window" && e.flag("hidden") && !script_shown()) {
                 continue;
             }
             out.push((e.clone(), r, depth));
@@ -202,6 +233,15 @@ fn window_rect(x: &Xdat, win: &Element, screen: Vec2) -> Rect {
     let screen_rect = Rect { x: 0.0, y: 0.0, w: screen.x, h: screen.y };
     let p = point(screen_rect, align.max(1)) - point(Rect { x: 0.0, y: 0.0, w, h }, align.max(1)) + Vec2::new(ax, ay);
     Rect { x: p.x, y: p.y, w, h }
+}
+
+/// Position (inside its window) and size of a control, as laid out.
+pub fn ctrl_rect(x: &Xdat, window: &str, ctrl: &str, screen: Vec2) -> Option<(Vec2, Vec2)> {
+    let win = x.window(window)?;
+    let r = window_rect(x, win, screen);
+    let mut items = Vec::new();
+    layout(win, Rect { x: 0.0, y: 0.0, w: r.w, h: r.h }, &|_| false, &mut items);
+    items.into_iter().find(|(e, _, _)| e.name() == ctrl).map(|(_, r, _)| (Vec2::new(r.x, r.y), Vec2::new(r.w, r.h)))
 }
 
 fn image_node(t: &UiTex, e: Option<&Element>) -> ImageNode {
@@ -245,8 +285,10 @@ fn abs_node(r: Rect, origin: Vec2) -> Node {
 
 /// Builds a top-level window. `hide` names controls left out (states the
 /// client's scripts would switch off).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_window(
     commands: &mut Commands,
+    iface: &Interface,
     x: &Xdat,
     name: &str,
     screen: Vec2,
@@ -274,6 +316,16 @@ pub fn spawn_window(
     if let Some(t) = tex.get(win.str("backTex"), lib, images) {
         commands.entity(root).insert(image_node(&t, None));
     }
+    // Framed windows show their title in the header.
+    if let Some(title) = iface.string(win.int("title")) {
+        commands.spawn((
+            Text::new(title),
+            TextFont { font_size: FontSize::Px(12.0), ..default() },
+            TextColor(Color::srgb(0.85, 0.8, 0.65)),
+            Node { position_type: PositionType::Absolute, left: Val::Px(12.0), top: Val::Px(8.0), ..default() },
+            ChildOf(root),
+        ));
+    }
     let mut items = Vec::new();
     layout(win, Rect { x: 0.0, y: 0.0, w: rect.w, h: rect.h }, hide, &mut items);
     for (e, r, _) in items {
@@ -289,7 +341,15 @@ pub fn spawn_window(
             }
             "Texture" => {
                 if let Some(t) = tex.get(e.str("file"), lib, images) {
-                    commands.entity(id).insert(image_node(&t, Some(&e)));
+                    let mut img = image_node(&t, Some(&e));
+                    // Type 1 ("Normal") draws the texture at its own size,
+                    // cut to the control.
+                    if e.int("type") == 1 && img.rect.is_none() && t.split9.is_none() {
+                        let (w, h) = (r.w.min(t.size.x), r.h.min(t.size.y));
+                        img.rect = Some(bevy::math::Rect::new(0.0, 0.0, w, h));
+                        commands.entity(id).insert(abs_node(Rect { w, h, ..r }, Vec2::ZERO));
+                    }
+                    commands.entity(id).insert(img);
                 }
             }
             "Button" => {
@@ -297,7 +357,8 @@ pub fn spawn_window(
                     commands.entity(id).insert(image_node(&t, None));
                 }
                 let label = e.str("buttonNameText");
-                if !label.is_empty() && label != "undefined" {
+                let label = if label.is_empty() || label == "undefined" { iface.string(e.int("buttonName")).unwrap_or("") } else { label };
+                if !label.is_empty() {
                     commands.entity(id).insert((
                         Text::new(label),
                         TextFont { font_size: FontSize::Px(11.0), ..default() },
@@ -337,13 +398,24 @@ pub fn spawn_window(
             }
             "TextBox" | "NameCtrl" => {
                 let text = e.str("text");
-                let text = if text == "undefined" { "" } else { text };
+                let text = if text == "undefined" || text.is_empty() { iface.string(e.int("sysstring")).unwrap_or("") } else { text };
                 commands.entity(id).insert((
                     CtrlText,
                     Text::new(text),
                     TextFont { font_size: FontSize::Px(11.0), ..default() },
                     TextColor(Color::srgb(0.85, 0.82, 0.75)),
+                    TextLayout { linebreak: LineBreak::NoWrap, ..default() },
                 ));
+            }
+            "ItemWindow" => {
+                let iw = Vec2::new(e.int("iconWidth").max(32) as f32, e.int("iconHeight").max(32) as f32);
+                commands.entity(id).insert(ItemGrid {
+                    cols: e.int("col").max(1) as u32,
+                    icon: iw,
+                    gap: Vec2::new(e.int("gapX") as f32, e.int("gapY") as f32),
+                    // -9999 means unset.
+                    offset: Vec2::new(e.int("offsetX").max(0) as f32, e.int("offsetY").max(0) as f32),
+                });
             }
             "ChatWindow" => {
                 commands.entity(id).insert((

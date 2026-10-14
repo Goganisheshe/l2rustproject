@@ -14,7 +14,7 @@ pub struct StatusWindowPlugin;
 
 impl Plugin for StatusWindowPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, status_window.run_if(in_state(Phase::InWorld)));
+        app.add_systems(Update, status_window.run_if(in_state(Phase::InWorld)).run_if(not(resource_exists::<crate::l2ui::Interface>)));
     }
 }
 

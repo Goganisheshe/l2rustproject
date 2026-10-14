@@ -47,7 +47,7 @@ fn build_hud(
     let screen = windows.iter().next().map_or(Vec2::new(1920.0, 1080.0), |w| Vec2::new(w.width(), w.height()));
     let x = &iface.0;
     for name in ["StatusWnd", "TargetStatusWnd", "ChatWnd"] {
-        let Some(root) = spawn_window(&mut commands, x, name, screen, &hidden, &mut tex, &mut lib, &mut images) else {
+        let Some(root) = spawn_window(&mut commands, &iface, x, name, screen, &hidden, &mut tex, &mut lib, &mut images) else {
             warn!("window {name} not in interface.xdat");
             continue;
         };
@@ -70,7 +70,7 @@ fn build_hud(
         if let Some(h) = sw.children().iter().find(|c| c.name() == "ShortcutWndHorizontal") {
             let mut sub = (**x).clone();
             sub.windows = vec![h.clone()];
-            spawn_window(&mut commands, &sub, "ShortcutWndHorizontal", screen, &hidden, &mut tex, &mut lib, &mut images);
+            spawn_window(&mut commands, &iface, &sub, "ShortcutWndHorizontal", screen, &hidden, &mut tex, &mut lib, &mut images);
         }
     }
 }

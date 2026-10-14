@@ -587,10 +587,16 @@ fn quest_kills(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_dialog(
     mut commands: Commands,
     mut dialog: ResMut<Dialog>,
     roots: Query<Entity, With<DialogRoot>>,
+    iface: Option<Res<crate::l2ui::Interface>>,
+    windows: Query<&Window>,
+    mut tex: ResMut<crate::l2ui::UiTextures>,
+    mut lib: ResMut<crate::l2assets::L2Library>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     if !dialog.dirty {
         return;
@@ -603,33 +609,64 @@ fn render_dialog(
         return;
     }
     let selected = dialog.selected;
+    // Inside the client's NPCDialogWnd frame when the interface is loaded.
+    let screen = windows.iter().next().map_or(Vec2::new(1920.0, 1080.0), |w| Vec2::new(w.width(), w.height()));
+    let framed = iface.as_ref().and_then(|i| {
+        let root = crate::l2ui::spawn_window(&mut commands, i, &i.0, "NPCDialogWnd", screen, &|n| n == "HtmlViewer", &mut tex, &mut lib, &mut images)?;
+        let (pos, size) = crate::l2ui::ctrl_rect(&i.0, "NPCDialogWnd", "HtmlViewer", screen)?;
+        commands.entity(root).insert(DialogRoot);
+        Some(
+            commands
+                .spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(pos.x + 4.0),
+                        top: Val::Px(pos.y + 4.0),
+                        width: Val::Px(size.x - 8.0),
+                        height: Val::Px(size.y - 8.0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(4.0),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    ChildOf(root),
+                ))
+                .id(),
+        )
+    });
+    let content = framed.unwrap_or_else(|| {
+        commands
+            .spawn((
+                DialogRoot,
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(16.0),
+                    top: Val::Px(80.0),
+                    width: Val::Px(420.0),
+                    max_height: Val::Percent(80.0),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(10.0)),
+                    row_gap: Val::Px(6.0),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.04, 0.04, 0.07, 0.9)),
+            ))
+            .id()
+    });
+    let fs = if framed.is_some() { 12.0 } else { 15.0 };
     commands
-        .spawn((
-            DialogRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                right: Val::Px(16.0),
-                top: Val::Px(80.0),
-                width: Val::Px(420.0),
-                max_height: Val::Percent(80.0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(Val::Px(10.0)),
-                row_gap: Val::Px(6.0),
-                overflow: Overflow::clip(),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.04, 0.04, 0.07, 0.9)),
-        ))
+        .entity(content)
         .with_children(|p| {
             let mut link_no = 0;
             for (i, b) in dialog.blocks.iter().enumerate() {
                 match b {
                     Block::Text(spans) => {
-                        p.spawn((Text::default(), TextFont { font_size: FontSize::Px(15.0), ..default() })).with_children(|t| {
+                        p.spawn((Text::default(), TextFont { font_size: FontSize::Px(fs), ..default() })).with_children(|t| {
                             for s in spans {
                                 t.spawn((
                                     TextSpan::new(s.text.clone()),
-                                    TextFont { font_size: FontSize::Px(15.0), ..default() },
+                                    TextFont { font_size: FontSize::Px(fs), ..default() },
                                     TextColor(span_color(s.color.as_deref())),
                                 ));
                             }
@@ -651,7 +688,7 @@ fn render_dialog(
                         .with_children(|b| {
                             b.spawn((
                                 Text::new(label.clone()),
-                                TextFont { font_size: FontSize::Px(15.0), ..default() },
+                                TextFont { font_size: FontSize::Px(fs), ..default() },
                                 TextColor(if on { Color::srgb(1.0, 0.85, 0.3) } else { Color::srgb(0.75, 0.85, 1.0) }),
                             ));
                         });
