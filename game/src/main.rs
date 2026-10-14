@@ -3,10 +3,12 @@
 mod input;
 mod character;
 mod collision;
+mod datapack;
 mod effects;
 mod gamedata;
 mod l2assets;
 mod mmo;
+mod rpg;
 mod skinned;
 mod streaming;
 mod survivor;
@@ -35,7 +37,7 @@ fn main() {
     } else if std::env::var_os("L2_SURVIVOR").is_some() {
         app.add_plugins(survivor::SurvivorPlugin);
     } else {
-        app.add_plugins((streaming::TileStreamPlugin, mmo::MmoPlugin));
+        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin));
     }
     app.run();
 }

@@ -13,6 +13,8 @@ use bevy::prelude::*;
 
 use crate::character::{find_class, part_spec, weapon_spec, CharClass, CLASSES};
 use crate::collision::CollisionWorld;
+use crate::datapack::Datapack;
+use crate::rpg::{spawn_hud, template_for, HeroStats};
 use crate::input::PlayerInput;
 use crate::l2assets::L2Library;
 use crate::skinned::{spawn_model, Animated, Attachment, Model, ModelCache};
@@ -22,8 +24,23 @@ use crate::streaming::{bevy_to_ue, tile_of, ue_to_bevy, TileStreamer};
 const RUN_SPEED: f32 = 120.0 / 27.0;
 const WALK_SPEED: f32 = 60.0 / 27.0;
 
-/// Starting point per race (Unreal units), the classic newbie villages.
-fn start_location(class: &CharClass) -> [f32; 3] {
+/// Starting point. The datapack's creation points are the remade Talking
+/// Island, but this client ships the classic island geometry (16_25.unr is
+/// identical to 16_25_Classic.unr), so everyone starts in a village whose
+/// geometry matches the datapack spawns.
+fn start_location(class: &CharClass, _dp: &Datapack) -> [f32; 3] {
+    // L2_START="x,y,z" overrides (Unreal units), e.g. a hunting ground for tests.
+    if let Some(p) = std::env::var("L2_START").ok().and_then(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() == 3).then(|| [v[0], v[1], v[2]])
+    }) {
+        return p;
+    }
+    race_village(class)
+}
+
+/// The classic newbie village of each race (Unreal units).
+fn race_village(class: &CharClass) -> [f32; 3] {
     let p = class.prefix;
     if p.contains("DarkElf") {
         [28295.0, 11063.0, -4224.0] // Dark Elf Village
@@ -36,12 +53,12 @@ fn start_location(class: &CharClass) -> [f32; 3] {
     } else if p.contains("Kamael") {
         [-125464.0, 37776.0, 1176.0] // Kamael Village
     } else {
-        [-71338.0, 258271.0, -3104.0] // Talking Island Village
+        [-80826.0, 149775.0, -3043.0] // Gludin Village
     }
 }
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-enum Phase {
+pub enum Phase {
     #[default]
     Create,
     Loading,
@@ -75,8 +92,8 @@ struct CreateUi;
 struct ClassLine(usize);
 
 #[derive(Component)]
-struct Hero {
-    actor: Entity,
+pub struct Hero {
+    pub actor: Entity,
 }
 
 #[derive(Component)]
@@ -204,8 +221,8 @@ fn close_create(mut commands: Commands, ui: Query<Entity, Or<(With<CreateUi>, Wi
     }
 }
 
-fn start_loading(mut commands: Commands, c: Res<Creation>, mut streamer: ResMut<TileStreamer>) {
-    let start = ue_to_bevy(start_location(&CLASSES[c.index]));
+fn start_loading(mut commands: Commands, c: Res<Creation>, dp: Res<Datapack>, mut streamer: ResMut<TileStreamer>) {
+    let start = ue_to_bevy(start_location(&CLASSES[c.index], &dp));
     streamer.request_around(start);
     commands.spawn((
         LoadingUi,
@@ -218,11 +235,12 @@ fn start_loading(mut commands: Commands, c: Res<Creation>, mut streamer: ResMut<
 fn wait_loading(
     mut commands: Commands,
     c: Res<Creation>,
+    dp: Res<Datapack>,
     streamer: Res<TileStreamer>,
     ui: Query<Entity, With<LoadingUi>>,
     mut next: ResMut<NextState<Phase>>,
 ) {
-    let ue = start_location(&CLASSES[c.index]);
+    let ue = start_location(&CLASSES[c.index], &dp);
     if streamer.is_loaded(tile_of(ue[0], ue[1])) {
         for e in &ui {
             commands.entity(e).despawn();
@@ -231,17 +249,43 @@ fn wait_loading(
     }
 }
 
-fn enter_world(mut commands: Commands, c: Res<Creation>, streamer: Res<TileStreamer>) {
-    let mut pos = ue_to_bevy(start_location(&CLASSES[c.index]));
-    if let Some(y) = streamer.ground_y(pos) {
-        pos.y = y;
+/// Walkable height closest to a server position (whose z comes from the
+/// server's geodata): a building floor or bridge near it, else the terrain.
+pub fn settle(pos: Vec3, streamer: &TileStreamer, world: &CollisionWorld) -> f32 {
+    let floor = world.ground(pos, 3.0, 6.0);
+    let terrain = streamer.ground_y(pos).filter(|y| (*y - pos.y).abs() < 6.0);
+    match (floor, terrain) {
+        (Some(f), Some(t)) => {
+            if (f - pos.y).abs() <= (t - pos.y).abs() {
+                f
+            } else {
+                t
+            }
+        }
+        (Some(f), None) => f,
+        (None, Some(t)) => t,
+        (None, None) => streamer.ground_y(pos).unwrap_or(pos.y),
     }
+}
+
+fn enter_world(
+    mut commands: Commands,
+    c: Res<Creation>,
+    dp: Res<Datapack>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
+) {
+    let class = &CLASSES[c.index];
+    let mut pos = ue_to_bevy(start_location(class, &dp));
+    pos.y = settle(pos, &streamer, &world);
     let hero = commands.spawn((Transform::from_translation(pos), Visibility::default())).id();
     let actor = match &c.model {
         Some(model) => spawn_model(&mut commands, model, hero, "wait_1HS", &c.attachments()),
         None => hero,
     };
-    commands.entity(hero).insert(Hero { actor });
+    let template = dp.classes.get(template_for(class.prefix)).cloned().unwrap_or_default();
+    commands.entity(hero).insert((Hero { actor }, HeroStats::new(template)));
+    spawn_hud(&mut commands);
     commands.spawn((
         HudText,
         Text::new(""),
@@ -250,6 +294,7 @@ fn enter_world(mut commands: Commands, c: Res<Creation>, streamer: Res<TileStrea
     ));
 }
 
+
 fn move_hero(
     time: Res<Time>,
     input: Res<PlayerInput>,
@@ -257,10 +302,13 @@ fn move_hero(
     orbit: Res<Orbit>,
     streamer: Res<TileStreamer>,
     world: Res<CollisionWorld>,
-    hero: Single<(&Hero, &mut Transform)>,
+    hero: Single<(&Hero, &mut Transform, &HeroStats)>,
     mut anims: Query<&mut Animated>,
 ) {
-    let (hero, mut tr) = hero.into_inner();
+    let (hero, mut tr, stats) = hero.into_inner();
+    if stats.hp <= 0.0 {
+        return;
+    }
     let d = input.move_dir;
     let walking = keys.pressed(KeyCode::ShiftLeft);
     // Camera-relative: stick up = away from the camera.
@@ -286,6 +334,9 @@ fn move_hero(
     };
     if let Some(y) = ground {
         tr.translation.y = y;
+    }
+    if stats.attacking && !moving {
+        return; // combat drives the animation
     }
     if let Ok(mut anim) = anims.get_mut(hero.actor) {
         if moving && walking {

@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::{crypt, Error, Reader};
 
 /// UE2 object reference: 0 = null, >0 = export index + 1, <0 = -(import index + 1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ObjectRef {
     #[default]
     Null,

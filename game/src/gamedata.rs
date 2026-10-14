@@ -76,6 +76,8 @@ pub struct MonsterKind {
 pub struct GameData {
     pub skills: Vec<Arc<SkillDef>>,
     pub monsters: Vec<MonsterKind>,
+    /// Every npcgrp entry's model: id -> (package, model spec with textures).
+    pub npc_models: HashMap<u32, (String, String)>,
 }
 
 impl GameData {
@@ -174,6 +176,21 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
     }
     skills.sort_by_key(|s| s.id);
 
+    let mut npc_models = HashMap::new();
+    for n in &npcs {
+        let Some((pkg, mesh)) = n.mesh.split_once('.') else { continue };
+        let textures: Vec<String> = n
+            .textures
+            .iter()
+            .filter_map(|t| {
+                let (p, rest) = t.split_once('.')?;
+                Some(format!("{p}/{}", rest.rsplit('.').next().unwrap_or(rest)))
+            })
+            .collect();
+        let spec = if textures.is_empty() { mesh.to_string() } else { format!("{mesh}@{}", textures.join("|")) };
+        npc_models.insert(n.id, (pkg.to_string(), spec));
+    }
+
     let mut seen = std::collections::HashSet::new();
     let mut monsters = Vec::new();
     for n in &npcs {
@@ -205,7 +222,7 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
             radius: (n.collision_radius * UU_TO_M).clamp(0.3, 1.2),
         });
     }
-    Ok(GameData { skills, monsters })
+    Ok(GameData { skills, monsters, npc_models })
 }
 
 /// `CastMidAnimName` -> `CastMid`.

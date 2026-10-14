@@ -1,0 +1,745 @@
+//! Offline gameplay on top of the streamed world: NPC spawns from the
+//! datapack, monster AI, targeting, auto-attack, experience and levels,
+//! death and respawn, and the HUD (HP/MP/EXP bars, target window, log).
+//!
+//! Formulas follow Lineage II in spirit: physical damage = 70 * P.Atk /
+//! P.Def (+-10%), attack interval = 500 000 / attack speed ms, stats grow
+//! with the level modifier (level + 89) / 100.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
+use bevy::prelude::*;
+use rand::Rng;
+
+use crate::collision::CollisionWorld;
+use crate::datapack::{Datapack, NpcTemplate, PlayerTemplate};
+use crate::gamedata::GameData;
+use crate::l2assets::{L2Library, UU_TO_M};
+use crate::mmo::{Hero, Phase};
+use crate::skinned::{spawn_model, Animated, Model, ModelCache};
+use crate::streaming::{ue_to_bevy, TileStreamer};
+
+/// Model kinds loaded per frame (each load decodes a skeletal mesh).
+const MODEL_LOADS_PER_FRAME: usize = 2;
+/// Starter weapon P.Atk added to the class base.
+const STARTER_WEAPON_PATK: f32 = 20.0;
+
+pub struct RpgPlugin;
+
+impl Plugin for RpgPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<NpcSpawner>()
+            .init_resource::<Target>()
+            .init_resource::<Log>()
+            .add_systems(
+                Update,
+                (
+                    spawn_npcs,
+                    attach_npc_models,
+                    pick_target,
+                    hero_attack,
+                    npc_ai,
+                    npc_respawn,
+                    hero_regen_and_death,
+                    update_hud,
+                )
+                    .chain()
+                    .run_if(in_state(Phase::InWorld)),
+            );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hero stats
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+pub struct HeroStats {
+    pub template: PlayerTemplate,
+    pub level: u32,
+    pub exp: u64,
+    pub sp: u64,
+    pub hp: f32,
+    pub mp: f32,
+    pub max_hp: f32,
+    pub max_mp: f32,
+    pub patk: f32,
+    pub pdef: f32,
+    pub atk_interval: f32,
+    /// Meters.
+    pub atk_range: f32,
+    pub hp_regen: f32,
+    pub mp_regen: f32,
+    pub atk_timer: f32,
+    pub attacking: bool,
+    pub dead_timer: f32,
+}
+
+impl HeroStats {
+    pub fn new(template: PlayerTemplate) -> Self {
+        let mut s = Self {
+            template,
+            level: 1,
+            exp: 0,
+            sp: 0,
+            hp: 0.0,
+            mp: 0.0,
+            max_hp: 0.0,
+            max_mp: 0.0,
+            patk: 0.0,
+            pdef: 0.0,
+            atk_interval: 1.0,
+            atk_range: 1.5,
+            hp_regen: 2.0,
+            mp_regen: 1.0,
+            atk_timer: 0.0,
+            attacking: false,
+            dead_timer: 0.0,
+        };
+        s.recalc();
+        s.hp = s.max_hp;
+        s.mp = s.max_mp;
+        s
+    }
+
+    /// Recomputes derived stats for the current level.
+    pub fn recalc(&mut self) {
+        let t = &self.template;
+        let lvl_mod = (self.level as f32 + 89.0) / 100.0;
+        let gain = t.levels.get(self.level as usize - 1).or(t.levels.last()).cloned().unwrap_or_default();
+        let str_bonus = 1.0 + (t.str_ - 40.0) * 0.02;
+        let con_bonus = 1.0 + (t.con - 40.0) * 0.02;
+        self.max_hp = gain.hp * con_bonus.max(0.5);
+        self.max_mp = gain.mp;
+        self.hp_regen = gain.hp_regen;
+        self.mp_regen = gain.mp_regen;
+        self.patk = (t.patk + STARTER_WEAPON_PATK) * str_bonus.max(0.5) * lvl_mod;
+        self.pdef = t.pdef * lvl_mod;
+        self.atk_interval = 500.0 / t.patk_speed.max(1.0) * 0.6;
+        self.atk_range = (t.atk_range.max(40.0) + 30.0) * UU_TO_M;
+        self.hp = self.hp.min(self.max_hp);
+        self.mp = self.mp.min(self.max_mp);
+    }
+}
+
+/// Starting class template for a character-creation entry.
+pub fn template_for(prefix: &str) -> &'static str {
+    match prefix {
+        "MFighter" | "FFighter" => "HumanFighter",
+        "MMagic" | "FMagic" => "HumanMystic",
+        "MElf" | "FElf" => "ElvenFighter",
+        "MDarkElf" | "FDarkElf" => "DarkFighter",
+        "MOrc" | "FOrc" => "OrcFighter",
+        "MShaman" | "FShaman" => "OrcMystic",
+        "MDwarf" | "FDwarf" => "DwarvenFighter",
+        "MKamael" => "KamaelMaleSoldier",
+        "FKamael" => "KamaelFemaleSoldier",
+        _ => "HumanFighter",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NPCs
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum NpcState {
+    Idle,
+    Chase,
+    Return,
+    Dead,
+}
+
+#[derive(Component)]
+pub struct Npc {
+    pub template: Arc<NpcTemplate>,
+    spawn: usize,
+    home: Vec3,
+    pub hp: f32,
+    state: NpcState,
+    atk_timer: f32,
+    dead_timer: f32,
+    /// Hit by the hero: turns passive monsters hostile.
+    provoked: bool,
+    actor: Option<Entity>,
+}
+
+#[derive(Component)]
+struct NeedsModel;
+
+#[derive(Resource, Default)]
+struct NpcSpawner {
+    spawned_tiles: HashSet<String>,
+    /// Spawn indices waiting for respawn, with remaining seconds.
+    respawns: Vec<(usize, f32)>,
+    models: HashMap<u32, Option<Arc<Model>>>,
+    templates: HashMap<u32, Arc<NpcTemplate>>,
+}
+
+fn spawn_npc(
+    commands: &mut Commands,
+    spawner: &mut NpcSpawner,
+    dp: &Datapack,
+    streamer: &TileStreamer,
+    world: &CollisionWorld,
+    idx: usize,
+) {
+    let s = &dp.spawns[idx];
+    let Some(t) = dp.npcs.get(&s.npc) else { return };
+    let template = spawner.templates.entry(s.npc).or_insert_with(|| Arc::new(t.clone())).clone();
+    let mut pos = ue_to_bevy(s.pos);
+    pos.y = crate::mmo::settle(pos, streamer, world);
+    let yaw = -(s.heading as f32) * std::f32::consts::TAU / 65536.0;
+    commands.spawn((
+        Npc {
+            hp: template.hp,
+            template,
+            spawn: idx,
+            home: pos,
+            state: NpcState::Idle,
+            atk_timer: 0.0,
+            dead_timer: 0.0,
+            provoked: false,
+            actor: None,
+        },
+        NeedsModel,
+        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+        Visibility::default(),
+    ));
+}
+
+fn spawn_npcs(
+    mut commands: Commands,
+    mut spawner: ResMut<NpcSpawner>,
+    dp: Res<Datapack>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
+) {
+    for tile in streamer.loaded_tiles() {
+        if spawner.spawned_tiles.contains(tile) {
+            continue;
+        }
+        spawner.spawned_tiles.insert(tile.clone());
+        let Some((x, y)) = tile.split_once('_').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))) else {
+            continue;
+        };
+        let list = dp.spawns_by_tile.get(&(x, y)).cloned().unwrap_or_default();
+        for idx in &list {
+            spawn_npc(&mut commands, &mut spawner, &dp, &streamer, &world, *idx);
+        }
+        info!("tile {tile}: {} npcs spawned", list.len());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attach_npc_models(
+    mut commands: Commands,
+    mut spawner: ResMut<NpcSpawner>,
+    data: Res<GameData>,
+    mut lib: ResMut<L2Library>,
+    mut cache: ResMut<ModelCache>,
+    mut assets: (
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<StandardMaterial>>,
+        ResMut<Assets<Image>>,
+        ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    ),
+    mut pending: Query<(Entity, &mut Npc), With<NeedsModel>>,
+) {
+    let (meshes, materials, images, bindposes) = &mut assets;
+    let mut loads = 0;
+    for (e, mut npc) in &mut pending {
+        let id = npc.template.id;
+        if !spawner.models.contains_key(&id) {
+            if loads >= MODEL_LOADS_PER_FRAME {
+                continue;
+            }
+            loads += 1;
+            let model = data
+                .npc_models
+                .get(&id)
+                .and_then(|(pkg, spec)| cache.load(&mut lib, pkg, spec, None, meshes, materials, images, bindposes));
+            spawner.models.insert(id, model);
+        }
+        commands.entity(e).remove::<NeedsModel>();
+        if let Some(Some(model)) = spawner.models.get(&id) {
+            npc.actor = Some(spawn_model(&mut commands, model, e, "Wait", &[]));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Targeting and combat
+// ---------------------------------------------------------------------------
+
+#[derive(Resource, Default)]
+pub struct Target(pub Option<Entity>);
+
+#[derive(Resource, Default)]
+pub struct Log(VecDeque<String>);
+
+impl Log {
+    pub fn push(&mut self, s: impl Into<String>) {
+        self.0.push_back(s.into());
+        while self.0.len() > 7 {
+            self.0.pop_front();
+        }
+    }
+}
+
+/// Tab / gamepad RB: next monster in front of the camera; left click picks
+/// the NPC under the cursor; F / gamepad X attacks.
+#[allow(clippy::too_many_arguments)]
+fn pick_target(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    gamepads: Query<&Gamepad>,
+    windows: Query<&Window>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    mut target: ResMut<Target>,
+    hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
+    npcs: Query<(Entity, &Npc, &Transform), Without<Hero>>,
+    mut log: ResMut<Log>,
+) {
+    let (hero_tr, mut stats) = hero.into_inner();
+    // L2_AUTOFIGHT: keep targeting and attacking the nearest monster (tests).
+    let auto = std::env::var_os("L2_AUTOFIGHT").is_some() && stats.hp > 0.0;
+    let target_dead = target.0.is_none_or(|e| npcs.get(e).map_or(true, |(_, n, _)| n.state == NpcState::Dead));
+    let cycle = keys.just_pressed(KeyCode::Tab)
+        || gamepads.iter().any(|g| g.just_pressed(GamepadButton::RightTrigger))
+        || (auto && target_dead);
+    if auto && !target_dead {
+        stats.attacking = true;
+    }
+    if cycle {
+        let mut cands: Vec<(Entity, f32)> = npcs
+            .iter()
+            .filter(|(_, n, t)| n.state != NpcState::Dead && n.template.is_monster() && t.translation.distance(hero_tr.translation) < 30.0)
+            .map(|(e, _, t)| (e, t.translation.distance(hero_tr.translation)))
+            .collect();
+        cands.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let next = match target.0.and_then(|cur| cands.iter().position(|c| c.0 == cur)) {
+            Some(i) => cands.get(i + 1).or(cands.first()).map(|c| c.0),
+            None => cands.first().map(|c| c.0),
+        };
+        target.0 = next;
+        stats.attacking = false;
+    }
+    if mouse.just_pressed(MouseButton::Left) {
+        let (cam, cam_tr) = camera.into_inner();
+        let cursor = windows.iter().next().and_then(|w| w.cursor_position());
+        if let Some(ray) = cursor.and_then(|c| cam.viewport_to_world(cam_tr, c).ok()) {
+            let mut best = None;
+            for (e, n, t) in &npcs {
+                if n.state == NpcState::Dead {
+                    continue;
+                }
+                let r = (n.template.radius * UU_TO_M).max(0.4);
+                let center = t.translation + Vec3::Y * (n.template.height * UU_TO_M).max(0.8);
+                let to = center - ray.origin;
+                let along = to.dot(*ray.direction);
+                if along > 0.0 && (to - *ray.direction * along).length() < r + 0.4 {
+                    if best.is_none_or(|(_, d)| along < d) {
+                        best = Some((e, along));
+                    }
+                }
+            }
+            if let Some((e, _)) = best {
+                if target.0 == Some(e) {
+                    stats.attacking = true; // second click attacks
+                }
+                target.0 = Some(e);
+            }
+        }
+    }
+    let attack = keys.just_pressed(KeyCode::KeyF) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::West));
+    if attack {
+        if let Some((_, n, _)) = target.0.and_then(|e| npcs.get(e).ok()) {
+            if n.template.is_monster() {
+                stats.attacking = true;
+            } else {
+                log.push(format!("{}: {}", n.template.name, "..."));
+            }
+        }
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        target.0 = None;
+        stats.attacking = false;
+    }
+}
+
+fn damage(patk: f32, pdef: f32, rng: &mut impl Rng) -> (f32, bool) {
+    let crit = rng.random_bool(0.08);
+    let base = 70.0 * patk / pdef.max(1.0) * rng.random_range(0.9..1.1);
+    (if crit { base * 2.0 } else { base }.max(1.0), crit)
+}
+
+/// Runs to the target and auto-attacks it, awarding experience on kills.
+#[allow(clippy::too_many_arguments)]
+fn hero_attack(
+    time: Res<Time>,
+    input: Res<crate::input::PlayerInput>,
+    dp: Res<Datapack>,
+    mut target: ResMut<Target>,
+    mut log: ResMut<Log>,
+    hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
+    mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
+    mut anims: Query<&mut Animated>,
+) {
+    let (hero, mut tr, mut stats) = hero.into_inner();
+    let dt = time.delta_secs();
+    stats.atk_timer -= dt;
+    if stats.hp <= 0.0 || !stats.attacking || input.move_dir.length() > 0.1 {
+        if input.move_dir.length() > 0.1 {
+            stats.attacking = false;
+        }
+        return;
+    }
+    let Some(te) = target.0 else {
+        stats.attacking = false;
+        return;
+    };
+    let Ok((mut npc, ntr)) = npcs.get_mut(te) else {
+        target.0 = None;
+        stats.attacking = false;
+        return;
+    };
+    if npc.state == NpcState::Dead {
+        stats.attacking = false;
+        return;
+    }
+    let to = (ntr.translation - tr.translation).with_y(0.0);
+    let reach = stats.atk_range + npc.template.radius * UU_TO_M;
+    tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
+    let mut anim = anims.get_mut(hero.actor).ok();
+    if to.length() > reach {
+        let speed = stats.template.run_speed * UU_TO_M;
+        tr.translation += to.normalize() * speed * dt;
+        if let Some(a) = anim.as_mut() {
+            a.play(&["run_1HS", "run"], true);
+        }
+        return;
+    }
+    if stats.atk_timer > 0.0 {
+        if let Some(a) = anim.as_mut() {
+            if a.finished() || a.looping {
+                a.play(&["AtkWait_1HS", "wait_1HS"], true);
+            }
+        }
+        return;
+    }
+    stats.atk_timer = stats.atk_interval;
+    if let Some(a) = anim.as_mut() {
+        a.restart(&["Atk01_1HS", "atk01"], false);
+    }
+    let mut rng = rand::rng();
+    let (dmg, crit) = damage(stats.patk, npc.template.pdef, &mut rng);
+    npc.hp -= dmg;
+    npc.provoked = true;
+    log.push(format!("You hit {} for {:.0}{}", npc.template.name, dmg, if crit { " (critical)" } else { "" }));
+    if npc.hp <= 0.0 {
+        npc.hp = 0.0;
+        npc.state = NpcState::Dead;
+        npc.dead_timer = 0.0;
+        stats.attacking = false;
+        let gained = npc.template.exp;
+        stats.exp += gained;
+        stats.sp += npc.template.sp;
+        log.push(format!("{} died. +{} XP, +{} SP", npc.template.name, gained, npc.template.sp));
+        let new_level = dp.level_for(stats.exp);
+        if new_level > stats.level {
+            stats.level = new_level;
+            stats.recalc();
+            stats.hp = stats.max_hp;
+            stats.mp = stats.max_mp;
+            log.push(format!("Level up! You are now level {new_level}"));
+        }
+    }
+}
+
+/// Monster AI: aggro, chase, attack, leash back home.
+fn npc_ai(
+    time: Res<Time>,
+    mut log: ResMut<Log>,
+    hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
+    mut npcs: Query<(&mut Npc, &mut Transform), Without<Hero>>,
+    mut anims: Query<&mut Animated>,
+) {
+    let dt = time.delta_secs();
+    let (hero_tr, mut stats) = hero.into_inner();
+    let hero_pos = hero_tr.translation;
+    let hero_alive = stats.hp > 0.0;
+    let mut rng = rand::rng();
+    for (mut npc, mut tr) in &mut npcs {
+        let anim = npc.actor.and_then(|a| anims.get_mut(a).ok());
+        if npc.state == NpcState::Dead {
+            if let Some(mut a) = anim {
+                a.play(&["Death"], false);
+            }
+            continue;
+        }
+        if !npc.template.is_monster() {
+            continue;
+        }
+        let dist = tr.translation.distance(hero_pos);
+        let aggro = npc.template.aggro_range * UU_TO_M;
+        let from_home = tr.translation.distance(npc.home);
+        match npc.state {
+            NpcState::Idle => {
+                if hero_alive && (npc.provoked || (aggro > 0.0 && dist < aggro)) {
+                    npc.state = NpcState::Chase;
+                }
+            }
+            NpcState::Chase => {
+                if !hero_alive || from_home > 25.0 {
+                    npc.state = NpcState::Return;
+                    npc.provoked = false;
+                }
+            }
+            NpcState::Return => {
+                if from_home < 0.5 {
+                    npc.state = NpcState::Idle;
+                    npc.hp = npc.template.hp;
+                }
+            }
+            NpcState::Dead => {}
+        }
+        let mut anim = anim;
+        match npc.state {
+            NpcState::Chase => {
+                let to = (hero_pos - tr.translation).with_y(0.0);
+                tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
+                let reach = (npc.template.atk_range + npc.template.radius) * UU_TO_M + 0.5;
+                if to.length() > reach {
+                    tr.translation += to.normalize() * npc.template.run_speed * UU_TO_M * dt;
+                    tr.translation.y = hero_pos.y.max(tr.translation.y - 2.0 * dt);
+                    if let Some(a) = anim.as_mut() {
+                        a.play(&["Run", "Walk"], true);
+                    }
+                } else {
+                    npc.atk_timer -= dt;
+                    if npc.atk_timer <= 0.0 {
+                        npc.atk_timer = 500.0 / npc.template.atk_speed.max(1.0);
+                        if let Some(a) = anim.as_mut() {
+                            a.restart(&["atk01", "Atk01"], false);
+                        }
+                        let (dmg, crit) = damage(npc.template.patk, stats.pdef, &mut rng);
+                        stats.hp -= dmg;
+                        log.push(format!("{} hits you for {:.0}{}", npc.template.name, dmg, if crit { " (critical)" } else { "" }));
+                    } else if let Some(a) = anim.as_mut() {
+                        if a.finished() || a.looping {
+                            a.play(&["AtkWait", "Wait"], true);
+                        }
+                    }
+                }
+            }
+            NpcState::Return => {
+                let to = (npc.home - tr.translation).with_y(0.0);
+                tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
+                tr.translation += to.normalize_or_zero() * (npc.template.walk_speed * 2.0 * UU_TO_M * dt).min(to.length());
+                if let Some(a) = anim.as_mut() {
+                    a.play(&["Walk", "Run"], true);
+                }
+            }
+            _ => {
+                if let Some(a) = anim.as_mut() {
+                    a.play(&["Wait"], true);
+                }
+            }
+        }
+    }
+}
+
+/// Corpses vanish after a few seconds and come back after the datapack
+/// respawn time.
+fn npc_respawn(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut spawner: ResMut<NpcSpawner>,
+    dp: Res<Datapack>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
+    mut target: ResMut<Target>,
+    mut npcs: Query<(Entity, &mut Npc)>,
+) {
+    let dt = time.delta_secs();
+    for (e, mut npc) in &mut npcs {
+        if npc.state != NpcState::Dead {
+            continue;
+        }
+        npc.dead_timer += dt;
+        if npc.dead_timer > 6.0 {
+            let respawn = dp.spawns.get(npc.spawn).map_or(60.0, |s| s.respawn).clamp(10.0, 600.0);
+            spawner.respawns.push((npc.spawn, respawn));
+            if target.0 == Some(e) {
+                target.0 = None;
+            }
+            commands.entity(e).despawn();
+        }
+    }
+    let mut due = Vec::new();
+    spawner.respawns.retain_mut(|(idx, t)| {
+        *t -= dt;
+        if *t <= 0.0 {
+            due.push(*idx);
+            false
+        } else {
+            true
+        }
+    });
+    for idx in due {
+        spawn_npc(&mut commands, &mut spawner, &dp, &streamer, &world, idx);
+    }
+}
+
+fn hero_regen_and_death(
+    time: Res<Time>,
+    dp: Res<Datapack>,
+    mut log: ResMut<Log>,
+    hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
+    mut anims: Query<&mut Animated>,
+) {
+    let dt = time.delta_secs();
+    let (h, mut tr, mut stats) = hero.into_inner();
+    if stats.hp <= 0.0 {
+        if stats.dead_timer == 0.0 {
+            log.push("You have died. Returning to the village...");
+            stats.attacking = false;
+        }
+        stats.dead_timer += dt;
+        if let Ok(mut a) = anims.get_mut(h.actor) {
+            a.play(&["Death"], false);
+        }
+        if stats.dead_timer > 4.0 {
+            stats.dead_timer = 0.0;
+            stats.hp = stats.max_hp * 0.7;
+            stats.mp = stats.max_mp * 0.7;
+            if let Some(p) = stats.template.creation_points.first() {
+                tr.translation = ue_to_bevy(*p);
+            }
+            let _ = &dp;
+        }
+        return;
+    }
+    stats.hp = (stats.hp + stats.hp_regen * dt * 0.5).min(stats.max_hp);
+    stats.mp = (stats.mp + stats.mp_regen * dt * 0.5).min(stats.max_mp);
+}
+
+// ---------------------------------------------------------------------------
+// HUD
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+struct Bar(BarKind);
+
+#[derive(Clone, Copy, PartialEq)]
+enum BarKind {
+    Hp,
+    Mp,
+    Exp,
+    TargetHp,
+}
+
+#[derive(Component)]
+struct BarLabel(BarKind);
+
+#[derive(Component)]
+struct TargetWindow;
+
+#[derive(Component)]
+struct LogText;
+
+pub fn spawn_hud(commands: &mut Commands) {
+    let bar = |p: &mut ChildSpawnerCommands, kind: BarKind, color: Color, width: f32| {
+        p.spawn((Node { width: Val::Px(width), height: Val::Px(16.0), ..default() }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6))))
+            .with_children(|b| {
+                b.spawn((Bar(kind), Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() }, BackgroundColor(color)));
+                b.spawn((
+                    BarLabel(kind),
+                    Text::new(""),
+                    TextFont { font_size: FontSize::Px(12.0), ..default() },
+                    Node { position_type: PositionType::Absolute, left: Val::Px(6.0), ..default() },
+                ));
+            });
+    };
+    // Status window (top-left).
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(36.0),
+            left: Val::Px(10.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(3.0),
+            ..default()
+        })
+        .with_children(|p| {
+            bar(p, BarKind::Hp, Color::srgb(0.75, 0.12, 0.1), 240.0);
+            bar(p, BarKind::Mp, Color::srgb(0.12, 0.3, 0.8), 240.0);
+            bar(p, BarKind::Exp, Color::srgb(0.85, 0.75, 0.2), 240.0);
+        });
+    // Target window (top-center).
+    commands
+        .spawn((
+            TargetWindow,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(10.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|p| {
+            bar(p, BarKind::TargetHp, Color::srgb(0.75, 0.12, 0.1), 280.0);
+        });
+    // System messages (bottom-left).
+    commands.spawn((
+        LogText,
+        Text::new(""),
+        TextFont { font_size: FontSize::Px(15.0), ..default() },
+        Node { position_type: PositionType::Absolute, bottom: Val::Px(12.0), left: Val::Px(12.0), ..default() },
+    ));
+}
+
+#[allow(clippy::type_complexity)]
+fn update_hud(
+    target: Res<Target>,
+    log: Res<Log>,
+    dp: Res<Datapack>,
+    hero: Single<&HeroStats>,
+    npcs: Query<&Npc>,
+    mut bars: Query<(&Bar, &mut Node)>,
+    mut labels: Query<(&BarLabel, &mut Text), Without<LogText>>,
+    mut window: Single<&mut Visibility, With<TargetWindow>>,
+    mut log_text: Single<&mut Text, With<LogText>>,
+) {
+    let s = *hero;
+    let cur = dp.exp.get(s.level as usize).copied().unwrap_or(0);
+    let next = dp.exp.get(s.level as usize + 1).copied().unwrap_or(cur + 1);
+    let exp_frac = (s.exp.saturating_sub(cur)) as f32 / (next.saturating_sub(cur)).max(1) as f32;
+    let tgt = target.0.and_then(|e| npcs.get(e).ok());
+    for (bar, mut node) in &mut bars {
+        let frac = match bar.0 {
+            BarKind::Hp => s.hp / s.max_hp.max(1.0),
+            BarKind::Mp => s.mp / s.max_mp.max(1.0),
+            BarKind::Exp => exp_frac,
+            BarKind::TargetHp => tgt.map_or(0.0, |n| n.hp / n.template.hp.max(1.0)),
+        };
+        node.width = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
+    }
+    for (label, mut text) in &mut labels {
+        text.0 = match label.0 {
+            BarKind::Hp => format!("HP {:.0} / {:.0}", s.hp.max(0.0), s.max_hp),
+            BarKind::Mp => format!("MP {:.0} / {:.0}", s.mp, s.max_mp),
+            BarKind::Exp => format!("Lv {}  EXP {:.2}%  SP {}", s.level, exp_frac * 100.0, s.sp),
+            BarKind::TargetHp => tgt.map_or(String::new(), |n| {
+                format!("{} (Lv {})  {:.0} / {:.0}", n.template.name, n.template.level, n.hp.max(0.0), n.template.hp)
+            }),
+        };
+    }
+    **window = if tgt.is_some() { Visibility::Inherited } else { Visibility::Hidden };
+    log_text.0 = log.0.iter().cloned().collect::<Vec<_>>().join("\n");
+}

@@ -1,6 +1,7 @@
 //! Reader for Unreal Engine 2 packages as shipped with the Lineage II client.
 
 pub mod anim;
+pub mod bsp;
 pub mod crypt;
 pub mod dat;
 pub mod effect;

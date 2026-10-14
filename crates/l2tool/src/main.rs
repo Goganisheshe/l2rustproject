@@ -17,6 +17,16 @@ fn main() -> Result<()> {
         Some("defaults") => class_defaults(&args[2], &args[3]),
         Some("dat") => dat_summary(&args[2]),
         Some("map") => map_info(&args[2], &args[3]),
+        Some("bsp") => bsp_probe(&args[2], &args[3]),
+        Some("bspinfo") => {
+            let pkg = Package::open(&args[2])?;
+            let m = ue2::bsp::level_model(&pkg).context("no model")?;
+            let polys = ue2::bsp::read_bsp(&pkg, m)?;
+            let vis = polys.iter().filter(|p| p.visible()).count();
+            println!("{} polys ({} visible) in {}", polys.len(), vis, pkg.full_name(ue2::ObjectRef::Export(m)));
+            Ok(())
+        }
+        Some("height") => terrain_height(&args[2], &args[3], args[4].parse()?, args[5].parse()?),
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
@@ -426,7 +436,17 @@ pub fn map_info(client: &str, map: &str) -> Result<()> {
         }
     }
     println!("meshes resolved: {resolved}/{}", tile.actors.len());
-    for a in tile.actors.iter().take(3) {
+    // L2_NEAR="x,y,radius" lists actors around a point instead of the first three.
+    let near: Option<Vec<f32>> = std::env::var("L2_NEAR").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect());
+    let shown: Vec<_> = match &near {
+        Some(n) if n.len() == 3 => tile
+            .actors
+            .iter()
+            .filter(|a| ((a.location[0] - n[0]).powi(2) + (a.location[1] - n[1]).powi(2)).sqrt() < n[2])
+            .collect(),
+        _ => tile.actors.iter().take(3).collect(),
+    };
+    for a in shown {
         println!("  {} at {:?} rot {:?} scale {:?}", pkg.full_name(a.mesh), a.location, a.rotation, a.scale);
     }
     for t in &tile.terrains {
@@ -445,6 +465,75 @@ pub fn map_info(client: &str, map: &str) -> Result<()> {
         for l in &t.layers {
             println!("  layer {} alpha {} u{} v{}", pkg.full_name(l.texture), pkg.full_name(l.alpha_map), l.uscale, l.vscale);
         }
+    }
+    Ok(())
+}
+
+/// Samples a tile's terrain height at Unreal (x, y) with both row orders.
+pub fn terrain_height(client: &str, map: &str, x: f32, y: f32) -> Result<()> {
+    let mut lib = ue2::library::Library::new(client)?;
+    let pkg = lib.package(map).with_context(|| format!("no map {map}"))?;
+    let tile = ue2::world::read_map(&pkg)?;
+    for t in &tile.terrains {
+        let hm = lib.resolve(&pkg, t.heightmap).with_context(|| "heightmap")?;
+        let h = ue2::world::read_heightmap(&hm.package, hm.export)?;
+        let fi = (x - t.location[0]) / t.scale[0] + h.width as f32 / 2.0;
+        let fj = (y - t.location[1]) / t.scale[1] + h.height as f32 / 2.0;
+        let (i, j) = (fi.round().clamp(0.0, 255.0) as usize, fj.round().clamp(0.0, 255.0) as usize);
+        let z = |v: u16| t.location[2] + (v as f32 - 32768.0) * t.scale[2] / 256.0;
+        println!(
+            "cell ({i},{j}): z={:.0}; flipped rows z={:.0}; flipped cols z={:.0}",
+            z(h.data[j * h.width + i]),
+            z(h.data[(h.height - 1 - j) * h.width + i]),
+            z(h.data[j * h.width + (h.width - 1 - i)])
+        );
+    }
+    Ok(())
+}
+
+/// Probes the level BSP model layout.
+pub fn bsp_probe(path: &str, object: &str) -> Result<()> {
+    let pkg = Package::open(path)?;
+    let idx = pkg.find_export(object).with_context(|| format!("no export {object}"))?;
+    let (_, start) = ue2::props::read_object(&pkg, idx)?;
+    let data = pkg.export_data(idx);
+    let mut r = ue2::Reader::at(data, start);
+    r.skip(25 + 16)?;
+    let nv = r.compact()? as usize;
+    r.skip(nv * 12)?;
+    let np = r.compact()? as usize;
+    r.skip(np * 12)?;
+    let nn = r.compact()? as usize;
+    println!("vectors {nv}, points {np}, nodes {nn} at {:#x}", r.pos);
+    let mut max_vp = 0;
+    let mut total_verts = 0usize;
+    for _ in 0..nn {
+        r.skip(16 + 8 + 1)?;
+        let vp = r.compact()?;
+        for _ in 0..6 {
+            r.compact()?;
+        }
+        r.skip(16 + 16 + 2)?;
+        let nverts = r.u8()? as usize;
+        r.skip(8 + 12)?;
+        max_vp = max_vp.max(vp as usize + nverts);
+        total_verts += nverts;
+    }
+    let ns = r.compact()?;
+    println!("after nodes at {:#x}: max vertpool {max_vp}, total node verts {total_verts}, surfs {ns}", r.pos);
+    for _ in 0..ns {
+        r.compact()?;
+        r.u32()?;
+        for _ in 0..6 {
+            r.compact()?;
+        }
+        r.skip(16 + 4 + 4)?;
+    }
+    let nverts = r.compact()?;
+    println!("after surfs at {:#x}: verts {nverts}", r.pos);
+    let base = r.pos;
+    for row in data[base..base + 192].chunks(16) {
+        println!("{}", row.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
     }
     Ok(())
 }

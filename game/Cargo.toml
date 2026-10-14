@@ -8,3 +8,4 @@ ue2 = { path = "../crates/ue2" }
 # bevy_gilrs (on by default) provides gamepad input through gilrs.
 bevy = "0.20"
 rand = "0.9"
+roxmltree = "0.21.1"

@@ -161,6 +161,10 @@ impl TileStreamer {
         }
     }
 
+    pub fn loaded_tiles(&self) -> impl Iterator<Item = &String> {
+        self.loaded.iter()
+    }
+
     pub fn is_loaded(&self, tile: (i32, i32)) -> bool {
         self.loaded.contains(&format!("{}_{}", tile.0, tile.1))
     }
@@ -212,6 +216,19 @@ fn prepare_tile(
     if let Some(t) = tile.terrains.first() {
         out.terrain = prepare_terrain(lib, &pkg, t);
     }
+    // Brush (BSP) geometry: town walls, floors, dungeons.
+    if let Some(model) = ue2::bsp::level_model(&pkg) {
+        match ue2::bsp::read_bsp(&pkg, model) {
+            Ok(polys) => {
+                let (sections, tris) = prepare_bsp(lib, &pkg, &polys);
+                out.collision.extend(tris);
+                let key = format!("{name}#bsp");
+                out.meshes.push((key.clone(), sections));
+                out.placements.push((key, Transform::IDENTITY));
+            }
+            Err(e) => eprintln!("bsp {name}: {e}"),
+        }
+    }
     for a in &tile.actors {
         let Some(h) = lib.resolve(&pkg, a.mesh) else { continue };
         let key = format!("{}.{}", h.package.name, h.name());
@@ -232,6 +249,65 @@ fn prepare_tile(
         out.placements.push((key, transform));
     }
     out
+}
+
+/// BSP polygons grouped by material into meshes, plus solid triangles.
+fn prepare_bsp(
+    lib: &mut Library,
+    pkg: &std::sync::Arc<ue2::Package>,
+    polys: &[ue2::bsp::BspPoly],
+) -> (Vec<PreparedSection>, Vec<[Vec3; 3]>) {
+    use ue2::bsp::{PF_MASKED, PF_TRANSLUCENT, PF_TWO_SIDED};
+    let mut tris = Vec::new();
+    let mut groups: HashMap<(ObjectRef, u32), Vec<usize>> = HashMap::new();
+    for (i, p) in polys.iter().enumerate() {
+        if p.solid() {
+            let v: Vec<Vec3> = p.verts.iter().map(|&v| ue_to_bevy(v)).collect();
+            for k in 1..v.len() - 1 {
+                tris.push([v[0], v[k], v[k + 1]]);
+            }
+        }
+        if p.visible() {
+            let style = p.flags & (PF_MASKED | PF_TRANSLUCENT | PF_TWO_SIDED);
+            groups.entry((p.material, style)).or_default().push(i);
+        }
+    }
+    let mut sections = Vec::new();
+    for ((material, style), list) in groups {
+        let mut info = lib.resolve(pkg, material).and_then(|m| lib.material_info(&m));
+        let (tw, th) = info.as_ref().map_or((256.0, 256.0), |m| (m.texture.width as f32, m.texture.height as f32));
+        if let Some(m) = info.as_mut() {
+            m.cutout |= style & PF_MASKED != 0;
+            // Winding of BSP polygons varies after the CSG build; draw both sides.
+            m.two_sided = true;
+        }
+        let _ = PF_TWO_SIDED;
+        let (mut pos, mut nrm, mut uv, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for &i in &list {
+            let p = &polys[i];
+            let base = pos.len() as u32;
+            let n = ue_to_bevy(p.normal) / UU_TO_M;
+            for &v in &p.verts {
+                pos.push(ue_to_bevy(v).to_array());
+                nrm.push(n.to_array());
+                let t = p.texel(v);
+                uv.push([t[0] / tw, t[1] / th]);
+            }
+            // Unreal polygons are clockwise; the Y/Z mirror flips them, so a
+            // plain fan comes out counter-clockwise for Bevy.
+            for k in 1..p.verts.len() as u32 - 1 {
+                idx.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
+        }
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+        mesh.insert_indices(Indices::U32(idx));
+        let material_key = format!("{}:bsp:{:?}:{style}", pkg.name, material);
+        sections.push(PreparedSection { mesh, material_key, material: info });
+    }
+    (sections, tris)
 }
 
 /// GPU-ready sections plus mesh-space collision triangles.
