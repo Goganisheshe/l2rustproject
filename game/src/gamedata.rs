@@ -78,6 +78,8 @@ pub struct GameData {
     pub monsters: Vec<MonsterKind>,
     /// Every npcgrp entry's model: id -> (package, model spec with textures).
     pub npc_models: HashMap<u32, (String, String)>,
+    /// Client-side visuals (animations, effects, icon) for every skill id.
+    pub visuals: HashMap<u32, Arc<SkillDef>>,
 }
 
 impl GameData {
@@ -145,34 +147,38 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
     let effects = lib.lib.as_mut().and_then(|l| l.package("lineageskilleffect"));
     let visuals = effects.map(|p| skill_visuals(&p)).unwrap_or_default();
 
+    // Every skill's visuals (any operate type), plus the offensive subset
+    // used by the survivors mode.
     let mut skills = Vec::new();
+    let mut all_visuals = HashMap::new();
     for s in skillgrp.iter().filter(|s| s.level == 1 && s.sublevel == 0) {
-        // Offensive actives only: negative effect point, active operate types.
-        if s.effect_point >= 0 || s.operate_type > 1 || s.cast_range == 0 || s.is_magic > 1 {
-            continue;
-        }
-        let Some(name) = skill_names.get(&(s.id, 1)) else { continue };
-        let Some(v) = visuals.get(&s.id) else { continue };
-        let Some(combo) = s.animations.first().and_then(|c| combos.get(c)) else { continue };
-        if combo.anims.is_empty() || (v.casting.is_empty() && v.shot.is_empty() && v.explosion.is_empty()) {
-            continue;
-        }
-        skills.push(Arc::new(SkillDef {
+        let combo = s.animations.first().and_then(|c| combos.get(c));
+        let v = visuals.get(&s.id).cloned().unwrap_or_default();
+        let def = Arc::new(SkillDef {
             id: s.id,
-            name: name.clone(),
+            name: skill_names.get(&(s.id, 1)).cloned().unwrap_or_default(),
             icon: s.icon.clone(),
             magic: s.is_magic == 1,
             power: (s.effect_point as f32).abs(),
             range: s.cast_range as f32 * UU_TO_M,
             hit_time: s.hit_time,
             reuse: s.reuse_delay,
-            anims: combo.anims.iter().map(|a| clip_base(a)).collect(),
-            looped: combo.looped,
+            anims: combo.map(|c| c.anims.iter().map(|a| clip_base(a)).collect()).unwrap_or_default(),
+            looped: combo.is_some_and(|c| c.looped),
             casting: v.casting.clone(),
             shot: v.shot.clone(),
             explosion: v.explosion.clone(),
             flying_time: v.flying_time,
-        }));
+        });
+        all_visuals.insert(s.id, def.clone());
+        // Offensive actives only: negative effect point, active operate types.
+        if s.effect_point >= 0 || s.operate_type > 1 || s.cast_range == 0 || s.is_magic > 1 {
+            continue;
+        }
+        if def.name.is_empty() || def.anims.is_empty() || (v.casting.is_empty() && v.shot.is_empty() && v.explosion.is_empty()) {
+            continue;
+        }
+        skills.push(def);
     }
     skills.sort_by_key(|s| s.id);
 
@@ -222,7 +228,7 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
             radius: (n.collision_radius * UU_TO_M).clamp(0.3, 1.2),
         });
     }
-    Ok(GameData { skills, monsters, npc_models })
+    Ok(GameData { skills, monsters, npc_models, visuals: all_visuals })
 }
 
 /// `CastMidAnimName` -> `CastMid`.

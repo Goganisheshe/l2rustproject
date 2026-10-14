@@ -59,6 +59,8 @@ impl Plugin for RpgPlugin {
 #[derive(Component)]
 pub struct HeroStats {
     pub template: PlayerTemplate,
+    /// Datapack template / skill tree name (`HumanFighter`...).
+    pub class_key: String,
     pub level: u32,
     pub exp: u64,
     pub sp: u64,
@@ -68,6 +70,10 @@ pub struct HeroStats {
     pub max_mp: f32,
     pub patk: f32,
     pub pdef: f32,
+    pub matk: f32,
+    pub mdef: f32,
+    /// Run speed in Unreal units per second (buffs change it).
+    pub run_speed: f32,
     pub atk_interval: f32,
     /// Meters.
     pub atk_range: f32,
@@ -78,12 +84,26 @@ pub struct HeroStats {
     pub dead_timer: f32,
     /// Where the hero returns after death (the starting village).
     pub respawn: Vec3,
+    /// Active buffs from skills.
+    pub buffs: Vec<Buff>,
+}
+
+/// A timed stat modifier from a skill effect (PhysicalAttack, Speed...).
+#[derive(Clone, Debug)]
+pub struct Buff {
+    pub skill: u32,
+    pub stat: String,
+    pub amount: f32,
+    /// true = percent, false = flat.
+    pub percent: bool,
+    pub remaining: f32,
 }
 
 impl HeroStats {
     pub fn new(template: PlayerTemplate) -> Self {
         let mut s = Self {
             template,
+            class_key: String::new(),
             level: 1,
             exp: 0,
             sp: 0,
@@ -93,6 +113,9 @@ impl HeroStats {
             max_mp: 0.0,
             patk: 0.0,
             pdef: 0.0,
+            matk: 0.0,
+            mdef: 0.0,
+            run_speed: 120.0,
             atk_interval: 1.0,
             atk_range: 1.5,
             hp_regen: 2.0,
@@ -101,6 +124,7 @@ impl HeroStats {
             attacking: false,
             dead_timer: 0.0,
             respawn: Vec3::ZERO,
+            buffs: Vec::new(),
         };
         s.recalc();
         s.hp = s.max_hp;
@@ -121,11 +145,40 @@ impl HeroStats {
         self.mp_regen = gain.mp_regen;
         self.patk = (t.patk + STARTER_WEAPON_PATK) * str_bonus.max(0.5) * lvl_mod;
         self.pdef = t.pdef * lvl_mod;
-        self.atk_interval = 500.0 / t.patk_speed.max(1.0) * 0.6;
+        let int_bonus = 1.0 + (t.int - 40.0) * 0.02;
+        self.matk = t.matk * int_bonus.max(0.5) * lvl_mod * lvl_mod;
+        self.mdef = t.mdef * lvl_mod;
+        self.run_speed = t.run_speed;
+        let mut atk_speed = t.patk_speed;
+        for b in &self.buffs {
+            let apply = |v: &mut f32| {
+                if b.percent {
+                    *v *= 1.0 + b.amount / 100.0
+                } else {
+                    *v += b.amount
+                }
+            };
+            match b.stat.as_str() {
+                "PhysicalAttack" => apply(&mut self.patk),
+                "PhysicalDefence" => apply(&mut self.pdef),
+                "MagicalAttack" => apply(&mut self.matk),
+                "MagicalDefence" => apply(&mut self.mdef),
+                "Speed" => apply(&mut self.run_speed),
+                "PhysicalAttackSpeed" => apply(&mut atk_speed),
+                "MaxHp" => apply(&mut self.max_hp),
+                "MaxMp" => apply(&mut self.max_mp),
+                _ => {}
+            }
+        }
+        self.atk_interval = 500.0 / atk_speed.max(1.0) * 0.6;
         self.atk_range = (t.atk_range.max(40.0) + 30.0) * UU_TO_M;
         self.hp = self.hp.min(self.max_hp);
         self.mp = self.mp.min(self.max_mp);
     }
+}
+
+pub fn template_for_stats(stats: &HeroStats) -> &str {
+    &stats.class_key
 }
 
 /// Starting class template for a character-creation entry.
@@ -148,7 +201,7 @@ pub fn template_for(prefix: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum NpcState {
+pub enum NpcState {
     Idle,
     Chase,
     Return,
@@ -161,11 +214,11 @@ pub struct Npc {
     spawn: usize,
     home: Vec3,
     pub hp: f32,
-    state: NpcState,
+    pub state: NpcState,
     atk_timer: f32,
     dead_timer: f32,
     /// Hit by the hero: turns passive monsters hostile.
-    provoked: bool,
+    pub provoked: bool,
     actor: Option<Entity>,
 }
 
@@ -281,7 +334,7 @@ fn attach_npc_models(
 pub struct Target(pub Option<Entity>);
 
 #[derive(Resource, Default)]
-pub struct Log(VecDeque<String>);
+pub struct Log(pub VecDeque<String>);
 
 impl Log {
     pub fn push(&mut self, s: impl Into<String>) {
@@ -375,7 +428,7 @@ fn pick_target(
     }
 }
 
-fn damage(patk: f32, pdef: f32, rng: &mut impl Rng) -> (f32, bool) {
+pub fn damage(patk: f32, pdef: f32, rng: &mut impl Rng) -> (f32, bool) {
     let crit = rng.random_bool(0.08);
     let base = 70.0 * patk / pdef.max(1.0) * rng.random_range(0.9..1.1);
     (if crit { base * 2.0 } else { base }.max(1.0), crit)
@@ -420,7 +473,7 @@ fn hero_attack(
     tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
     let mut anim = anims.get_mut(hero.actor).ok();
     if to.length() > reach {
-        let speed = stats.template.run_speed * UU_TO_M;
+        let speed = stats.run_speed * UU_TO_M;
         tr.translation += to.normalize() * speed * dt;
         if let Some(a) = anim.as_mut() {
             a.play(&["run_1HS", "run"], true);
@@ -445,22 +498,30 @@ fn hero_attack(
     npc.provoked = true;
     log.push(format!("You hit {} for {:.0}{}", npc.template.name, dmg, if crit { " (critical)" } else { "" }));
     if npc.hp <= 0.0 {
-        npc.hp = 0.0;
-        npc.state = NpcState::Dead;
-        npc.dead_timer = 0.0;
-        stats.attacking = false;
-        let gained = npc.template.exp;
-        stats.exp += gained;
-        stats.sp += npc.template.sp;
-        log.push(format!("{} died. +{} XP, +{} SP", npc.template.name, gained, npc.template.sp));
-        let new_level = dp.level_for(stats.exp);
-        if new_level > stats.level {
-            stats.level = new_level;
-            stats.recalc();
-            stats.hp = stats.max_hp;
-            stats.mp = stats.max_mp;
-            log.push(format!("Level up! You are now level {new_level}"));
-        }
+        award_kill(&mut npc, &mut stats, &dp, &mut log);
+    }
+}
+
+/// Marks an NPC dead and gives the hero its experience and SP.
+pub fn award_kill(npc: &mut Npc, stats: &mut HeroStats, dp: &Datapack, log: &mut Log) {
+    if npc.state == NpcState::Dead {
+        return;
+    }
+    npc.hp = 0.0;
+    npc.state = NpcState::Dead;
+    npc.dead_timer = 0.0;
+    stats.attacking = false;
+    let gained = npc.template.exp;
+    stats.exp += gained;
+    stats.sp += npc.template.sp;
+    log.push(format!("{} died. +{} XP, +{} SP", npc.template.name, gained, npc.template.sp));
+    let new_level = dp.level_for(stats.exp);
+    if new_level > stats.level {
+        stats.level = new_level;
+        stats.recalc();
+        stats.hp = stats.max_hp;
+        stats.mp = stats.max_mp;
+        log.push(format!("Level up! You are now level {new_level}"));
     }
 }
 

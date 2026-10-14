@@ -112,14 +112,16 @@ pub struct DatapackPlugin;
 
 impl Plugin for DatapackPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Datapack>().add_systems(PreStartup, load_datapack);
+        app.init_resource::<Datapack>().init_resource::<SkillBook>().add_systems(PreStartup, load_datapack);
     }
 }
 
-fn load_datapack(mut dp: ResMut<Datapack>) {
+fn load_datapack(mut dp: ResMut<Datapack>, mut book: ResMut<SkillBook>) {
     let root = std::env::var_os("L2_DATAPACK").map(PathBuf::from).unwrap_or_else(|| DEFAULT_DATAPACK.into());
     let start = std::time::Instant::now();
     *dp = load(&root);
+    *book = load_skills(&root);
+    info!("skills: {} definitions, {} class trees", book.skills.len(), book.trees.len());
     info!(
         "datapack {}: {} npcs, {} spawns, {} classes, max level {} ({:.1}s)",
         root.display(),
@@ -369,4 +371,157 @@ fn inside(poly: &[[f32; 2]], p: [f32; 2]) -> bool {
         j = i;
     }
     c
+}
+
+// ---------------------------------------------------------------------------
+// Skills (server side) and class skill trees
+// ---------------------------------------------------------------------------
+
+/// A value that may differ per skill level (index 0 = level 1).
+#[derive(Debug, Clone, Default)]
+pub struct Levelled(pub Vec<f32>);
+
+impl Levelled {
+    pub fn at(&self, level: u32) -> f32 {
+        let i = (level.max(1) - 1) as usize;
+        self.0.get(i).or(self.0.last()).copied().unwrap_or(0.0)
+    }
+}
+
+/// Reads `<tag>5</tag>` or `<tag><value level="1">5</value>...</tag>`.
+fn levelled(n: roxmltree::Node, tag: &str) -> Levelled {
+    let Some(c) = child(n, tag) else { return Levelled::default() };
+    let values: Vec<(usize, f32)> = c
+        .children()
+        .filter(|v| v.has_tag_name("value"))
+        .filter_map(|v| Some((attr::<usize>(v, "level")?, v.text()?.trim().parse().ok()?)))
+        .collect();
+    if values.is_empty() {
+        return Levelled(c.text().and_then(|t| t.trim().parse().ok()).into_iter().collect());
+    }
+    let max = values.iter().map(|v| v.0).max().unwrap_or(1);
+    let mut out = vec![0.0; max];
+    for (l, v) in values {
+        if l >= 1 {
+            out[l - 1] = v;
+        }
+    }
+    Levelled(out)
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillEffectDef {
+    pub name: String,
+    pub power: Levelled,
+    pub amount: Levelled,
+    /// "PER" or "DIFF".
+    pub mode: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerSkill {
+    pub id: u32,
+    pub name: String,
+    pub icon: String,
+    /// A1, A2, A3, CA1, DA1, P, T...
+    pub operate: String,
+    /// ENEMY, TARGET, SELF, ...
+    pub target: String,
+    pub cast_range: f32,
+    pub hit_time: f32,
+    pub reuse: f32,
+    pub abnormal_time: f32,
+    pub mp: Levelled,
+    pub effects: Vec<SkillEffectDef>,
+}
+
+impl ServerSkill {
+    pub fn is_active(&self) -> bool {
+        self.operate.starts_with('A') || self.operate.starts_with("CA") || self.operate.starts_with("DA")
+    }
+    pub fn is_offensive(&self) -> bool {
+        self.effects.iter().any(|e| matches!(e.name.as_str(), "PhysicalDamage" | "MagicalDamage" | "DamOverTime" | "MagicalAttackMp" | "HpDrain"))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeEntry {
+    pub skill: u32,
+    pub level: u32,
+    pub get_level: u32,
+    pub sp: u64,
+}
+
+#[derive(Resource, Default)]
+pub struct SkillBook {
+    pub skills: HashMap<u32, ServerSkill>,
+    /// Class skill trees by template file stem (`HumanFighter`...).
+    pub trees: HashMap<String, Vec<TreeEntry>>,
+}
+
+pub fn load_skills(root: &Path) -> SkillBook {
+    let mut book = SkillBook::default();
+    let mut files = Vec::new();
+    xml_files(&root.join("stats/skills"), &mut files);
+    for f in files {
+        let Ok(src) = std::fs::read_to_string(&f) else { continue };
+        let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
+        for s in doc.root_element().children().filter(|c| c.has_tag_name("skill")) {
+            let Some(id) = attr::<u32>(s, "id") else { continue };
+            let effects = child(s, "effects")
+                .map(|e| {
+                    e.children()
+                        .filter(|c| c.has_tag_name("effect"))
+                        .map(|c| SkillEffectDef {
+                            name: c.attribute("name").unwrap_or("").to_string(),
+                            power: levelled(c, "power"),
+                            amount: levelled(c, "amount"),
+                            mode: child(c, "mode").and_then(|m| m.text()).unwrap_or("DIFF").trim().to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let t = |tag: &str| child(s, tag).and_then(|n| n.text()).map(|x| x.trim().to_string()).unwrap_or_default();
+            book.skills.insert(
+                id,
+                ServerSkill {
+                    id,
+                    name: s.attribute("name").unwrap_or("").to_string(),
+                    icon: t("icon"),
+                    operate: t("operateType"),
+                    target: t("targetType"),
+                    cast_range: levelled(s, "castRange").at(1),
+                    hit_time: levelled(s, "hitTime").at(1) / 1000.0,
+                    reuse: levelled(s, "reuseDelay").at(1) / 1000.0,
+                    abnormal_time: levelled(s, "abnormalTime").at(1),
+                    mp: levelled(s, "mpConsume"),
+                    effects,
+                },
+            );
+        }
+    }
+    let mut files = Vec::new();
+    xml_files(&root.join("stats/players/skillTrees/StartingClass"), &mut files);
+    files.push(root.join("stats/players/skillTrees/Kamael/KamaelSoldier.xml"));
+    for f in files {
+        let Ok(src) = std::fs::read_to_string(&f) else { continue };
+        let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
+        let entries = doc
+            .descendants()
+            .filter(|c| c.has_tag_name("skill"))
+            .filter_map(|c| {
+                Some(TreeEntry {
+                    skill: attr(c, "skillId")?,
+                    level: attr(c, "skillLevel")?,
+                    get_level: attr(c, "getLevel").unwrap_or(1),
+                    sp: attr(c, "levelUpSp").unwrap_or(0),
+                })
+            })
+            // Item-unlocked entries (inventory tickets etc.) are not class skills.
+            .filter(|e| e.skill != 1372)
+            .collect();
+        let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        book.trees.insert(stem, entries);
+    }
+    book
 }

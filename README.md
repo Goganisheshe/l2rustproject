@@ -28,6 +28,14 @@ Movement: WASD / left stick (camera-relative), Shift walks; camera: Q/E,
 right stick or right mouse drag, wheel / triggers zoom. `L2_SURVIVOR=1`
 runs the survivors prototype described below.
 
+World data comes from the L2J Mobius Classic 3.0 datapack (`L2_DATAPACK`,
+default `G:/visery/l2-datapack/classic`): NPC stats and spawns, class
+templates, experience, server skills and class skill trees. Combat: Tab /
+click / RB target, F / X auto-attack; skills are learned automatically as you
+level (SP is spent) and sit on the 1–9 hotbar (gamepad: LB + A/B/X/Y = 1–4,
+LT + A/B/X/Y = 5–8). Test helpers: `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
+`L2_DEBUG_NPC=1`, `L2_START="x,y,z"`.
+
 A run starts on the character screen: 16 race/sex/archetype combinations
 (human fighter/mystic, elf, dark elf, orc fighter/mystic, dwarf, kamael),
 each assembled from the client's face, hair and starter-armor parts and

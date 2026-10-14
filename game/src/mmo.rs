@@ -286,6 +286,7 @@ fn enter_world(
     let template = dp.classes.get(template_for(class.prefix)).cloned().unwrap_or_default();
     let mut stats = HeroStats::new(template);
     stats.respawn = pos;
+    stats.class_key = template_for(class.prefix).to_string();
     commands.entity(hero).insert((Hero { actor }, stats));
     spawn_hud(&mut commands);
     commands.spawn((
@@ -319,7 +320,7 @@ fn move_hero(
     let dir = (forward * d.y + right * d.x).with_y(0.0);
     let moving = dir.length() > 0.1;
     if moving {
-        let speed = if walking { WALK_SPEED } else { RUN_SPEED };
+        let speed = if walking { WALK_SPEED } else { stats.run_speed * crate::l2assets::UU_TO_M };
         let step = dir.normalize() * speed * d.length().min(1.0) * time.delta_secs();
         let moved = slide(&world, tr.translation, step);
         tr.translation += moved;

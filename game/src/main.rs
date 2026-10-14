@@ -9,6 +9,7 @@ mod gamedata;
 mod l2assets;
 mod mmo;
 mod rpg;
+mod skillplay;
 mod skinned;
 mod streaming;
 mod survivor;
@@ -37,7 +38,7 @@ fn main() {
     } else if std::env::var_os("L2_SURVIVOR").is_some() {
         app.add_plugins(survivor::SurvivorPlugin);
     } else {
-        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin));
+        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin));
     }
     app.run();
 }
