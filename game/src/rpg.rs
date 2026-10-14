@@ -44,6 +44,7 @@ impl Plugin for RpgPlugin {
                     npc_respawn,
                     hero_regen_and_death,
                     update_hud,
+                    debug_npcs,
                 )
                     .chain()
                     .run_if(in_state(Phase::InWorld)),
@@ -75,6 +76,8 @@ pub struct HeroStats {
     pub atk_timer: f32,
     pub attacking: bool,
     pub dead_timer: f32,
+    /// Where the hero returns after death (the starting village).
+    pub respawn: Vec3,
 }
 
 impl HeroStats {
@@ -97,6 +100,7 @@ impl HeroStats {
             atk_timer: 0.0,
             attacking: false,
             dead_timer: 0.0,
+            respawn: Vec3::ZERO,
         };
         s.recalc();
         s.hp = s.max_hp;
@@ -316,7 +320,9 @@ fn pick_target(
     if cycle {
         let mut cands: Vec<(Entity, f32)> = npcs
             .iter()
-            .filter(|(_, n, t)| n.state != NpcState::Dead && n.template.is_monster() && t.translation.distance(hero_tr.translation) < 30.0)
+            .filter(|(_, n, t)| n.state != NpcState::Dead && n.template.is_monster() && t.translation.distance(hero_tr.translation) < 60.0)
+            // The auto-fighter only picks fights it can win.
+            .filter(|(_, n, _)| !auto || n.template.level <= stats.level + 3)
             .map(|(e, _, t)| (e, t.translation.distance(hero_tr.translation)))
             .collect();
         cands.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -616,9 +622,7 @@ fn hero_regen_and_death(
             stats.dead_timer = 0.0;
             stats.hp = stats.max_hp * 0.7;
             stats.mp = stats.max_mp * 0.7;
-            if let Some(p) = stats.template.creation_points.first() {
-                tr.translation = ue_to_bevy(*p);
-            }
+            tr.translation = stats.respawn;
             let _ = &dp;
         }
         return;
@@ -742,4 +746,27 @@ fn update_hud(
     }
     **window = if tgt.is_some() { Visibility::Inherited } else { Visibility::Hidden };
     log_text.0 = log.0.iter().cloned().collect::<Vec<_>>().join("\n");
+}
+
+/// `L2_DEBUG_NPC`: every 5 s, log the nearest monsters to the hero.
+pub fn debug_npcs(
+    time: Res<Time>,
+    mut timer: Local<f32>,
+    hero: Single<&Transform, With<Hero>>,
+    npcs: Query<(&Npc, &Transform), Without<Hero>>,
+) {
+    if std::env::var_os("L2_DEBUG_NPC").is_none() {
+        return;
+    }
+    *timer -= time.delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = 5.0;
+    let mut list: Vec<_> = npcs.iter().map(|(n, t)| (t.translation.distance(hero.translation), n, t.translation)).collect();
+    list.sort_by(|a, b| a.0.total_cmp(&b.0));
+    info!("hero at {:?}, {} npcs", hero.translation, list.len());
+    for (d, n, p) in list.iter().take(6) {
+        info!("  {} ({}, {}) at {:.1} m, y {:.1} vs hero {:.1}, model {}", n.template.name, n.template.id, n.template.kind, d, p.y, hero.translation.y, n.actor.is_some());
+    }
 }

@@ -284,7 +284,9 @@ fn enter_world(
         None => hero,
     };
     let template = dp.classes.get(template_for(class.prefix)).cloned().unwrap_or_default();
-    commands.entity(hero).insert((Hero { actor }, HeroStats::new(template)));
+    let mut stats = HeroStats::new(template);
+    stats.respawn = pos;
+    commands.entity(hero).insert((Hero { actor }, stats));
     spawn_hud(&mut commands);
     commands.spawn((
         HudText,
