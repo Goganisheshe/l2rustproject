@@ -27,6 +27,8 @@ pub struct ItemTemplate {
     pub bodypart: String,
     /// SWORD, BLUNT, DAGGER, BOW, DUAL... for weapons.
     pub weapon_type: String,
+    /// Skills cast when the item is used (scrolls, potions).
+    pub skills: Vec<u32>,
     pub stats: HashMap<String, f32>,
 }
 
@@ -86,11 +88,12 @@ pub struct ItemsPlugin;
 impl Plugin for ItemsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ItemData>()
+            .init_resource::<UseQueue>()
             .init_resource::<InventoryUi>()
             .add_systems(PreStartup, load_items)
             .add_systems(
                 Update,
-                (give_starting_items, loot, apply_equipment, hero_appearance, inventory_window).chain().run_if(in_state(Phase::InWorld)),
+                (give_starting_items, loot, apply_equipment, hero_appearance, inventory_window, use_items).chain().run_if(in_state(Phase::InWorld)),
             );
     }
 }
@@ -146,6 +149,12 @@ fn load_items(mut data: ResMut<ItemData>) {
                     icon: set("icon"),
                     bodypart: set("bodypart"),
                     weapon_type: set("weapon_type"),
+                    skills: n
+                        .children()
+                        .filter(|c| c.has_tag_name("skills"))
+                        .flat_map(|s| s.children().filter(|c| c.has_tag_name("skill")))
+                        .filter_map(|c| attr(c, "id"))
+                        .collect(),
                     stats,
                 },
             );
@@ -318,10 +327,16 @@ fn hero_appearance(
         ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     ),
     hero: Single<(Entity, &mut Hero, &Inventory), Changed<Inventory>>,
+    mut last: Local<Option<BTreeMap<String, u32>>>,
 ) {
     use crate::character::{armor_parts, armor_slot, equipment_spec, weapon_part, CLASSES};
     use crate::skinned::{spawn_model, Attachment};
     let (he, mut hero, inv) = hero.into_inner();
+    // Picking up loot changes the inventory too; only equipment matters here.
+    if last.as_ref() == Some(&inv.equipped) {
+        return;
+    }
+    *last = Some(inv.equipped.clone());
     let class = &CLASSES[hero.class];
     let race = armor_slot(class);
     let mut armor: HashMap<char, String> = HashMap::new();
@@ -373,6 +388,76 @@ fn hero_appearance(
     hero.stance = stance;
 }
 
+/// Items used from the inventory, applied by `use_items`.
+#[derive(Resource, Default)]
+pub struct UseQueue(pub Vec<u32>);
+
+/// Uses an item: consumes one and applies its skills' effects (teleport and
+/// escape scrolls, healing potions).
+#[allow(clippy::too_many_arguments)]
+fn use_items(
+    mut uses: ResMut<UseQueue>,
+    data: Res<ItemData>,
+    book: Res<crate::datapack::SkillBook>,
+    mut log: ResMut<Log>,
+    mut streamer: ResMut<crate::streaming::TileStreamer>,
+    hero: Single<(&mut Transform, &mut HeroStats, &mut Inventory), With<Hero>>,
+) {
+    if uses.0.is_empty() {
+        return;
+    }
+    let (mut tr, mut stats, mut inv) = hero.into_inner();
+    for id in std::mem::take(&mut uses.0) {
+        let Some(t) = data.items.get(&id) else { continue };
+        if inv.items.get(&id).copied().unwrap_or(0) == 0 || stats.hp <= 0.0 {
+            continue;
+        }
+        let mut used = false;
+        for def in t.skills.iter().filter_map(|s| book.skills.get(s)) {
+            for e in &def.effects {
+                match e.name.as_str() {
+                    "Teleport" => {
+                        if let Some(p) = e.pos {
+                            let pos = crate::streaming::ue_to_bevy(p);
+                            tr.translation = pos;
+                            streamer.request_around(pos);
+                            used = true;
+                        }
+                    }
+                    "Escape" => {
+                        let pos = stats.respawn;
+                        tr.translation = pos;
+                        streamer.request_around(pos);
+                        used = true;
+                    }
+                    "Heal" | "HealOverTime" | "Hp" => {
+                        let amount = e.power.at(1).max(e.amount.at(1));
+                        let amount = if e.name == "HealOverTime" { amount * def.abnormal_time.max(1.0) } else { amount };
+                        stats.hp = (stats.hp + amount).min(stats.max_hp);
+                        used = true;
+                    }
+                    "Mp" | "ManaHealOverTime" => {
+                        let amount = e.power.at(1).max(e.amount.at(1));
+                        stats.mp = (stats.mp + amount).min(stats.max_mp);
+                        used = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if used {
+            log.push(format!("You used {}", t.name));
+            let left = inv.items.get_mut(&id).unwrap();
+            *left -= 1;
+            if *left == 0 {
+                inv.items.remove(&id);
+            }
+        } else {
+            log.push(format!("{} cannot be used yet", t.name));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Inventory window
 // ---------------------------------------------------------------------------
@@ -401,6 +486,7 @@ fn inventory_window(
     mut icons: Local<HashMap<String, Option<Handle<Image>>>>,
     mut inv: Single<&mut Inventory, With<Hero>>,
     roots: Query<Entity, With<InventoryRoot>>,
+    mut uses: ResMut<UseQueue>,
     mut opened_by_env: Local<bool>,
 ) {
     // L2_INVENTORY=1 opens the window at start (screenshots).
@@ -430,7 +516,9 @@ fn inventory_window(
     // Equip / unequip with Enter or gamepad A (not while toggling).
     if input.confirm && !toggle {
         let (id, _) = list[ui.selected];
-        if let Some(t) = data.items.get(&id).filter(|t| t.equippable()) {
+        if data.items.get(&id).is_some_and(|t| !t.equippable() && !t.skills.is_empty()) {
+            uses.0.push(id);
+        } else if let Some(t) = data.items.get(&id).filter(|t| t.equippable()) {
             let slot = t.slot().to_string();
             if inv.equipped.get(&slot) == Some(&id) {
                 inv.equipped.remove(&slot);

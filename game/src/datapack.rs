@@ -108,6 +108,11 @@ impl Datapack {
     }
 }
 
+/// The datapack's `data` folder (`L2_DATAPACK`).
+pub fn datapack_root() -> PathBuf {
+    std::env::var_os("L2_DATAPACK").map(PathBuf::from).unwrap_or_else(|| DEFAULT_DATAPACK.into())
+}
+
 pub struct DatapackPlugin;
 
 impl Plugin for DatapackPlugin {
@@ -416,6 +421,8 @@ pub struct SkillEffectDef {
     pub amount: Levelled,
     /// "PER" or "DIFF".
     pub mode: String,
+    /// Teleport destination (Unreal units).
+    pub pos: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone)]
@@ -477,6 +484,10 @@ pub fn load_skills(root: &Path) -> SkillBook {
                             power: levelled(c, "power"),
                             amount: levelled(c, "amount"),
                             mode: child(c, "mode").and_then(|m| m.text()).unwrap_or("DIFF").trim().to_string(),
+                            pos: (|| {
+                                let v = |t: &str| child(c, t)?.text()?.trim().parse::<f32>().ok();
+                                Some([v("x")?, v("y")?, v("z")?])
+                            })(),
                         })
                         .collect()
                 })

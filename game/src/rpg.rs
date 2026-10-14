@@ -233,6 +233,8 @@ pub struct Npc {
     pub provoked: bool,
     /// Drops already rolled.
     pub looted: bool,
+    /// Death already reported to quests.
+    pub quest_seen: bool,
     actor: Option<Entity>,
 }
 
@@ -273,6 +275,7 @@ fn spawn_npc(
             dead_timer: 0.0,
             provoked: false,
             looted: false,
+            quest_seen: false,
             actor: None,
         },
         NeedsModel,
@@ -372,7 +375,7 @@ fn pick_target(
     mut target: ResMut<Target>,
     hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
     npcs: Query<(Entity, &Npc, &Transform), Without<Hero>>,
-    mut log: ResMut<Log>,
+    mut talk: ResMut<crate::dialog::TalkRequest>,
 ) {
     let (hero_tr, mut stats) = hero.into_inner();
     // L2_AUTOFIGHT: keep targeting and attacking the nearest monster (tests).
@@ -421,7 +424,11 @@ fn pick_target(
             }
             if let Some((e, _)) = best {
                 if target.0 == Some(e) {
-                    stats.attacking = true; // second click attacks
+                    // Second click attacks a monster or talks to an NPC.
+                    match npcs.get(e) {
+                        Ok((_, n, _)) if !n.template.is_monster() => talk.0 = Some(e),
+                        _ => stats.attacking = true,
+                    }
                 }
                 target.0 = Some(e);
             }
@@ -433,7 +440,7 @@ fn pick_target(
             if n.template.is_monster() {
                 stats.attacking = true;
             } else {
-                log.push(format!("{}: {}", n.template.name, "..."));
+                talk.0 = target.0;
             }
         }
     }
