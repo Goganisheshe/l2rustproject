@@ -54,8 +54,8 @@ teleports and the quest pages. What is playable:
   Monsters get the same functions from their datapack stats. Alt+T shows the
   status window (`L2_STATUS=1`).
 - Map: M (gamepad left stick press) opens the world map from the client's
-  `Minimap.worldmapN` art with the hero's position; a radar of the same map
-  sits in the top right corner (`L2_MAP=1` opens the map). Equipped armor and weapons
+  `Minimap.worldmapN` art with the hero's position (a radar of the same map
+  is shown only without the client interface). Equipped armor and weapons
   change the hero's model (client `armorgrp` / `weapongrp`), weapons switch
   the animation stance. Scrolls of escape / teleport and potions work.
 - NPCs: F / X or a second click on a friendly NPC walks up and opens its
@@ -72,12 +72,22 @@ teleports and the quest pages. What is playable:
   `L2_BOSS_HP` (default 0.05) and `L2_BOSS_ATK` (0.6).
 - Saving: every minute, on F5 and on exit to `saves/hero.json` (`L2_SAVE`);
   C / gamepad Y on the character screen continues.
+- Interface: the windows come from the client's own `system/interface.xdat`
+  (layout, textures, Split9 frames, default positions) with labels from
+  `sysstring-ru.dat` (`game/src/l2ui*.rs`): status, target, chat and shortcut
+  bar; the inventory (I) with the classic equipment panel and item grid
+  (click to equip / use); the character status (Alt+T); the skill window (K;
+  hover shows a skill, click learns it or puts it on the bar); NPC dialogs in
+  the NPCDialogWnd frame; the map (M) in MinimapWnd with wheel zoom; the
+  restart menu on death; the system menu (Alt+X, "Quit" saves and exits).
+  Without `interface.xdat` the game falls back to plain panels.
 
 Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
 `L2_DEBUG_NPC=1`, `L2_START="x,y,z"`, `L2_LEVEL=<n>`, `L2_CLASS_PICK=<i>`,
 `L2_TALK=<npc id>` with `L2_BYPASS="cmd|cmd"`, `L2_CONTINUE=1`,
 `L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`, `L2_MOVE_TO=dx,dz`, `L2_AUTOSHOTS=1`,
-`L2_SIT=1`, `L2_GROUNDLOOT=1` (with `L2_AUTOFIGHT`).
+`L2_SIT=1`, `L2_GROUNDLOOT=1` (with `L2_AUTOFIGHT`), `L2_STATUS=1`, `L2_MAP=1`,
+`L2_SYSMENU=1`, `L2_DIE=1` (dies once after 8 s).
 
 Monsters behave like on the server: only those flagged aggressive in the
 datapack attack on sight, the rest stroll around their spawn point until

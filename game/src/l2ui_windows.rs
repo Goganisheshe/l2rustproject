@@ -17,8 +17,53 @@ pub struct L2UiWindowsPlugin;
 impl Plugin for L2UiWindowsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StatusOpen>()
-            .add_systems(Update, (inventory_wnd, fill_inventory, status_wnd, fill_status).chain().run_if(in_state(Phase::InWorld)));
+            .add_systems(Update, (inventory_wnd, fill_inventory, status_wnd, fill_status, system_menu).chain().run_if(in_state(Phase::InWorld)));
     }
+}
+
+/// Alt+X: the system menu. Offline, only "Quit" does something (saving on
+/// the way out); the rest are online services.
+fn system_menu(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ua: crate::l2ui::UiAssets,
+    roots: Query<(Entity, &UiWindow)>,
+    mut clicks: ResMut<crate::l2ui::UiClicks>,
+    mut log: ResMut<crate::rpg::Log>,
+    mut exit: MessageWriter<AppExit>,
+    mut env_done: Local<bool>,
+) {
+    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    let open = find_root(&roots, "SystemMenuWnd");
+    let by_env = !*env_done && std::env::var_os("L2_SYSMENU").is_some();
+    *env_done = true;
+    if by_env || alt && keys.just_pressed(KeyCode::KeyX) || (open.is_some() && keys.just_pressed(KeyCode::Escape)) {
+        match open {
+            Some(e) => commands.entity(e).despawn(),
+            None => {
+                let screen = ua.screen();
+                if let Some(i) = ua.iface.as_deref() {
+                    // It hangs off the main menu button (bottom right), which
+                    // lives outside interface.xdat.
+                    if let Some(root) = spawn_window(&mut commands, i, &i.0, "SystemMenuWnd", screen, &|_| false, &mut ua.tex, &mut ua.lib, &mut ua.images) {
+                        commands.entity(root).entry::<Node>().and_modify(|mut n| {
+                            n.left = Val::Auto;
+                            n.top = Val::Auto;
+                            n.right = Val::Px(3.0);
+                            n.bottom = Val::Px(60.0);
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if clicks.take("SystemMenuWnd", "btnQuit") {
+        exit.write(AppExit::Success);
+    }
+    for (_, c) in clicks.0.iter().filter(|(w, _)| w == "SystemMenuWnd") {
+        log.push(format!("{c}: not available offline."));
+    }
+    clicks.0.retain(|(w, _)| w != "SystemMenuWnd");
 }
 
 fn screen(windows: &Query<&Window>) -> Vec2 {
