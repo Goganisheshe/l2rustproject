@@ -5,6 +5,7 @@ mod baium;
 mod black_lion;
 mod bounty;
 mod bounty2;
+mod cards;
 mod farmland;
 mod newbie;
 mod relics;
@@ -30,6 +31,7 @@ pub fn all() -> Vec<Box<dyn Quest>> {
     v.push(Box::new(farmland::Q00327));
     v.push(Box::new(black_lion::Q00333));
     v.push(Box::new(relics::Q00344));
+    v.push(Box::new(cards::Q00662));
     v.push(Box::new(relics::Q00500));
     v.push(Box::new(story::Q10866));
     v.push(Box::new(story::Q10673));
