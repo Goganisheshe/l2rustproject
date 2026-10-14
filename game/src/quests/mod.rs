@@ -1,5 +1,6 @@
 //! Ported datapack scripts: quests and NPC AI with dialogs.
 
+mod abyss;
 mod adventure;
 mod baium;
 mod black_lion;
@@ -35,6 +36,7 @@ pub fn all() -> Vec<Box<dyn Quest>> {
     v.push(Box::new(relics::Q00500));
     v.push(Box::new(story::Q10866));
     v.push(Box::new(story::Q10673));
+    v.extend(abyss::WINGS.iter().map(|q| Box::new(q) as Box<dyn Quest>));
     v.extend(adventure::ADVENTURES.iter().map(|q| Box::new(q) as Box<dyn Quest>));
     v.extend(newbie::FIRST.iter().map(|q| Box::new(q.clone()) as Box<dyn Quest>));
     v.extend(newbie::SECOND.iter().map(|q| Box::new(q.clone()) as Box<dyn Quest>));
