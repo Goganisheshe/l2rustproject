@@ -1,0 +1,379 @@
+//! The original client interface: windows from `system/interface.xdat`
+//! (positions, sizes, anchors, textures from the `L2UI_*` packages) built as
+//! Bevy UI nodes, with the controls the game drives (bars, texts, item
+//! slots, chat) bound by window / control name in `l2ui_bind.rs`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bevy::prelude::*;
+use bevy::ui::widget::NodeImageMode;
+use ue2::xdat::{Element, Xdat};
+
+use crate::l2assets::L2Library;
+
+const DEFAULT_CLIENT_DIR: &str = "G:/visery/l2-client";
+
+#[derive(Resource, Clone)]
+pub struct Interface(pub Arc<Xdat>);
+
+/// Loaded UI textures by xdat name (`L2UI_CT1.Windows.Windows_DF_Small_Bg`).
+#[derive(Resource, Default)]
+pub struct UiTextures(HashMap<String, Option<UiTex>>);
+
+#[derive(Clone)]
+pub struct UiTex {
+    pub image: Handle<Image>,
+    pub size: Vec2,
+    pub split9: Option<[i32; 6]>,
+}
+
+impl UiTextures {
+    pub fn get(&mut self, name: &str, lib: &mut L2Library, images: &mut Assets<Image>) -> Option<UiTex> {
+        if name.is_empty() || name.eq_ignore_ascii_case("undefined") || name.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        self.0
+            .entry(name.to_ascii_lowercase())
+            .or_insert_with(|| {
+                let (pkg, rest) = name.split_once('.')?;
+                let object = rest.rsplit('.').next()?;
+                let l = lib.lib.as_mut()?;
+                let h = l.find(pkg, object)?;
+                let t = ue2::texture::read_texture(&h.package, h.export).ok()?;
+                let size = Vec2::new(t.width as f32, t.height as f32);
+                let split9 = t.split9;
+                let img = Image::new(
+                    bevy::render::render_resource::Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+                    bevy::render::render_resource::TextureDimension::D2,
+                    t.rgba,
+                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
+                );
+                Some(UiTex { image: images.add(img), size, split9 })
+            })
+            .clone()
+    }
+}
+
+/// A built control: its window and name in the xdat.
+#[derive(Component, Clone)]
+pub struct UiCtrl {
+    pub window: String,
+    pub name: String,
+    pub class: String,
+    pub size: Vec2,
+}
+
+/// Root of a built top-level window.
+#[derive(Component)]
+pub struct UiWindow(pub String);
+
+/// The filled part of a status bar (its width follows the value).
+#[derive(Component)]
+pub struct BarFill {
+    pub full: f32,
+}
+
+/// Text node of a control.
+#[derive(Component)]
+pub struct CtrlText;
+
+pub struct L2UiPlugin;
+
+impl Plugin for L2UiPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<UiTextures>().add_systems(PreStartup, load_interface);
+    }
+}
+
+fn load_interface(mut commands: Commands) {
+    let root = std::env::var_os("L2_CLIENT_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| DEFAULT_CLIENT_DIR.into());
+    match std::fs::read(root.join("system/interface.xdat")).map_err(|e| e.to_string()).and_then(|d| ue2::xdat::parse(&d).map_err(|e| e.to_string())) {
+        Ok(x) => {
+            info!("interface.xdat: {} windows", x.windows.len());
+            commands.insert_resource(Interface(Arc::new(x)));
+        }
+        Err(e) => warn!("interface.xdat: {e}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Rect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+/// Point of a rect for an xdat alignment (NONE / TOP_LEFT ... BOTTOM_RIGHT).
+fn point(r: Rect, align: i32) -> Vec2 {
+    let (fx, fy) = match align {
+        2 => (0.5, 0.0),
+        3 => (1.0, 0.0),
+        4 => (0.0, 0.5),
+        5 => (0.5, 0.5),
+        6 => (1.0, 0.5),
+        7 => (0.0, 1.0),
+        8 => (0.5, 1.0),
+        9 => (1.0, 1.0),
+        _ => (0.0, 0.0),
+    };
+    Vec2::new(r.x + r.w * fx, r.y + r.h * fy)
+}
+
+fn size_of(e: &Element, parent: Rect) -> Vec2 {
+    if e.flag("equalToParentSize") {
+        return Vec2::new(parent.w, parent.h);
+    }
+    if !e.flag("size") {
+        // Item slots default to one icon; other controls fill the parent.
+        return match e.class.as_str() {
+            "ShortcutItemWindow" => Vec2::splat(36.0),
+            _ => Vec2::new(parent.w, parent.h),
+        };
+    }
+    let rel = |v: i32, p: f32| if v <= 0 { (p + v as f32).max(0.0) } else { v as f32 };
+    Vec2::new(rel(e.int("width"), parent.w), rel(e.int("height"), parent.h))
+}
+
+/// Lays out a window's controls (flattened) relative to its own top left.
+fn layout(win: &Element, root: Rect, hide: &dyn Fn(&str) -> bool, out: &mut Vec<(Element, Rect, usize)>) {
+    // (element, parent rect, depth)
+    let mut pending: Vec<(&Element, Rect, usize)> = win.children().iter().map(|c| (c, root, 1)).collect();
+    let mut rects: HashMap<String, Rect> = HashMap::new();
+    rects.insert(win.name().to_ascii_lowercase(), root);
+    // Anchors may point at controls defined later: resolve in passes.
+    for _ in 0..6 {
+        let mut next = Vec::new();
+        for (e, parent, depth) in pending {
+            let target = e.str("relativeTo").rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            let anchor = if !e.flag("usePosition") || target.is_empty() {
+                Some(parent)
+            } else {
+                rects.get(&target).copied()
+            };
+            let Some(anchor) = anchor else {
+                next.push((e, parent, depth));
+                continue;
+            };
+            let size = size_of(e, parent);
+            let pos = if e.flag("usePosition") {
+                let rel = e.int("relativePoint").max(1);
+                let own = e.int("anchorPoint").max(1);
+                let target_pt = point(anchor, rel);
+                let own_off = point(Rect { x: 0.0, y: 0.0, w: size.x, h: size.y }, own);
+                target_pt - own_off + Vec2::new(e.float("x"), e.float("y"))
+            } else {
+                Vec2::new(parent.x, parent.y)
+            };
+            let r = Rect { x: pos.x, y: pos.y, w: size.x, h: size.y };
+            rects.insert(e.name().to_ascii_lowercase(), r);
+            // Hidden controls take their whole subtree with them.
+            if hide(e.name()) || (e.class == "Window" && e.flag("hidden")) {
+                continue;
+            }
+            out.push((e.clone(), r, depth));
+            for c in e.children() {
+                next.push((c, r, depth + 1));
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        pending = next;
+    }
+}
+
+/// Screen rect of a top-level window from its default position.
+fn window_rect(x: &Xdat, win: &Element, screen: Vec2) -> Rect {
+    let def = x.wnd_def_pos.iter().find(|p| p.str("wnd").eq_ignore_ascii_case(win.name()));
+    let mut w = win.int("width") as f32;
+    let mut h = win.int("height") as f32;
+    if let Some(d) = def {
+        if d.int("width") > 0 {
+            w = d.int("width") as f32;
+        }
+        if d.int("height") > 0 {
+            h = d.int("height") as f32;
+        }
+    }
+    let (ax, ay, align) = def.map_or((win.float("x"), win.float("y"), win.int("relativePoint")), |d| (d.int("x") as f32, d.int("y") as f32, d.int("alignment")));
+    let screen_rect = Rect { x: 0.0, y: 0.0, w: screen.x, h: screen.y };
+    let p = point(screen_rect, align.max(1)) - point(Rect { x: 0.0, y: 0.0, w, h }, align.max(1)) + Vec2::new(ax, ay);
+    Rect { x: p.x, y: p.y, w, h }
+}
+
+fn image_node(t: &UiTex, e: Option<&Element>) -> ImageNode {
+    let mut node = ImageNode::new(t.image.clone());
+    node.image_mode = NodeImageMode::Stretch;
+    if let Some(e) = e {
+        let (u, v, us, vs) = (e.float("u"), e.float("v"), e.float("uSize"), e.float("vSize"));
+        if us > 0.0 && vs > 0.0 {
+            node.rect = Some(bevy::math::Rect::new(u, v, u + us, v + vs));
+        }
+        if e.int("type") == 2 {
+            node.image_mode = NodeImageMode::Tiled { tile_x: true, tile_y: true, stretch_value: 1.0 };
+        }
+    }
+    // Split9 stores cumulative positions: left border up to X1, right border
+    // from X2 to the edge (same for Y).
+    if let Some([x1, x2, _, y1, y2, _]) = t.split9 {
+        if node.rect.is_none() {
+            node.image_mode = NodeImageMode::Sliced(TextureSlicer {
+                border: BorderRect {
+                    min_inset: Vec2::new(x1 as f32, y1 as f32),
+                    max_inset: Vec2::new((t.size.x - x2 as f32).max(0.0), (t.size.y - y2 as f32).max(0.0)),
+                },
+                ..default()
+            });
+        }
+    }
+    node
+}
+
+fn abs_node(r: Rect, origin: Vec2) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(r.x - origin.x),
+        top: Val::Px(r.y - origin.y),
+        width: Val::Px(r.w),
+        height: Val::Px(r.h),
+        ..default()
+    }
+}
+
+/// Builds a top-level window. `hide` names controls left out (states the
+/// client's scripts would switch off).
+pub fn spawn_window(
+    commands: &mut Commands,
+    x: &Xdat,
+    name: &str,
+    screen: Vec2,
+    hide: &dyn Fn(&str) -> bool,
+    tex: &mut UiTextures,
+    lib: &mut L2Library,
+    images: &mut Assets<Image>,
+) -> Option<Entity> {
+    let win = x.window(name)?;
+    let rect = window_rect(x, win, screen);
+    let root = commands
+        .spawn((
+            UiWindow(win.name().to_string()),
+            UiCtrl { window: win.name().into(), name: win.name().into(), class: "Window".into(), size: Vec2::new(rect.w, rect.h) },
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(rect.x),
+                top: Val::Px(rect.y),
+                width: Val::Px(rect.w),
+                height: Val::Px(rect.h),
+                ..default()
+            },
+        ))
+        .id();
+    if let Some(t) = tex.get(win.str("backTex"), lib, images) {
+        commands.entity(root).insert(image_node(&t, None));
+    }
+    let mut items = Vec::new();
+    layout(win, Rect { x: 0.0, y: 0.0, w: rect.w, h: rect.h }, hide, &mut items);
+    for (e, r, _) in items {
+        let n = e.name();
+        let ctrl = UiCtrl { window: win.name().into(), name: n.into(), class: e.class.clone(), size: Vec2::new(r.w, r.h) };
+        let node = abs_node(r, Vec2::ZERO);
+        let id = commands.spawn((ctrl, node, ChildOf(root))).id();
+        match e.class.as_str() {
+            "Window" => {
+                if let Some(t) = tex.get(e.str("backTex"), lib, images) {
+                    commands.entity(id).insert(image_node(&t, None));
+                }
+            }
+            "Texture" => {
+                if let Some(t) = tex.get(e.str("file"), lib, images) {
+                    commands.entity(id).insert(image_node(&t, Some(&e)));
+                }
+            }
+            "Button" => {
+                if let Some(t) = tex.get(e.str("normalTex"), lib, images) {
+                    commands.entity(id).insert(image_node(&t, None));
+                }
+                let label = e.str("buttonNameText");
+                if !label.is_empty() && label != "undefined" {
+                    commands.entity(id).insert((
+                        Text::new(label),
+                        TextFont { font_size: FontSize::Px(11.0), ..default() },
+                        TextLayout { justify: Justify::Center, ..default() },
+                    ));
+                }
+            }
+            "StatusBar" => {
+                // Background, then the fill whose width follows the value.
+                let parts = |l: &str, c: &str, r: &str, tex: &mut UiTextures, lib: &mut L2Library, images: &mut Assets<Image>| {
+                    (tex.get(e.str(l), lib, images), tex.get(e.str(c), lib, images), tex.get(e.str(r), lib, images))
+                };
+                let (bl, bc, br) = parts("backLeftTex", "backTex", "backRightTex", tex, lib, images);
+                let (fl, fc, fr) = parts("foreLeftTex", "foreTex", "foreRightTex", tex, lib, images);
+                spawn_bar(commands, id, r, bl, bc, br, None);
+                let fill = commands
+                    .spawn((BarFill { full: r.w }, Node { position_type: PositionType::Absolute, width: Val::Px(r.w), height: Val::Px(r.h), overflow: Overflow::clip(), ..default() }, ChildOf(id)))
+                    .id();
+                spawn_bar(commands, fill, r, fl, fc, fr, Some(r.w));
+                commands.spawn((
+                    CtrlText,
+                    Text::new(""),
+                    TextFont { font_size: FontSize::Px(10.0), ..default() },
+                    TextLayout { justify: Justify::Center, ..default() },
+                    Node { position_type: PositionType::Absolute, width: Val::Px(r.w), top: Val::Px(-1.0), ..default() },
+                    ChildOf(id),
+                ));
+            }
+            "BarCtrl" => {
+                commands.entity(id).insert(BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)));
+                commands.spawn((
+                    BarFill { full: r.w },
+                    Node { position_type: PositionType::Absolute, width: Val::Px(r.w), height: Val::Px(r.h), ..default() },
+                    BackgroundColor(Color::srgb(0.75, 0.15, 0.1)),
+                    ChildOf(id),
+                ));
+            }
+            "TextBox" | "NameCtrl" => {
+                let text = e.str("text");
+                let text = if text == "undefined" { "" } else { text };
+                commands.entity(id).insert((
+                    CtrlText,
+                    Text::new(text),
+                    TextFont { font_size: FontSize::Px(11.0), ..default() },
+                    TextColor(Color::srgb(0.85, 0.82, 0.75)),
+                ));
+            }
+            "ChatWindow" => {
+                commands.entity(id).insert((
+                    CtrlText,
+                    Text::new(""),
+                    TextFont { font_size: FontSize::Px(12.0), ..default() },
+                    Node { position_type: PositionType::Absolute, left: Val::Px(r.x + 6.0), top: Val::Px(r.y + 4.0), width: Val::Px(r.w - 10.0), height: Val::Px(r.h - 6.0), flex_direction: FlexDirection::ColumnReverse, overflow: Overflow::clip(), ..default() },
+                ));
+            }
+            _ => {}
+        }
+    }
+    Some(root)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_bar(commands: &mut Commands, parent: Entity, r: Rect, l: Option<UiTex>, c: Option<UiTex>, rt: Option<UiTex>, fixed: Option<f32>) {
+    let w = fixed.unwrap_or(r.w);
+    let lw = l.as_ref().map_or(0.0, |t| t.size.x.min(w / 2.0));
+    let rw = rt.as_ref().map_or(0.0, |t| t.size.x.min(w / 2.0));
+    let mut put = |t: Option<UiTex>, x: f32, width: f32| {
+        if let Some(t) = t {
+            commands.spawn((
+                ImageNode { image_mode: NodeImageMode::Stretch, ..ImageNode::new(t.image) },
+                Node { position_type: PositionType::Absolute, left: Val::Px(x), width: Val::Px(width.max(0.0)), height: Val::Px(r.h), ..default() },
+                ChildOf(parent),
+            ));
+        }
+    };
+    put(l, 0.0, lw);
+    put(c, lw, w - lw - rw);
+    put(rt, w - rw, rw);
+}

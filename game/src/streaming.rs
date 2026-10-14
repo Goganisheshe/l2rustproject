@@ -454,6 +454,7 @@ fn bake_layers(l: &mut Library, pkg: &std::sync::Arc<ue2::Package>, t: &Terrain,
             rgba,
             masked: false,
             alpha: false,
+            split9: None,
         },
         false,
     ))

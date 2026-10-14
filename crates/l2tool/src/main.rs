@@ -29,6 +29,12 @@ fn main() -> Result<()> {
                 }
             }
             let filter = args.get(3).cloned().unwrap_or_default();
+            if filter == "pos" {
+                for p in &x.wnd_def_pos {
+                    println!("{} align {} at {},{} size {}x{}", p.str("wnd"), p.int("alignment"), p.int("x"), p.int("y"), p.int("width"), p.int("height"));
+                }
+                return Ok(());
+            }
             for w in &x.windows {
                 if filter.is_empty() {
                     println!("{} ({} children)", w.name(), w.children().len());
@@ -36,6 +42,15 @@ fn main() -> Result<()> {
                     dump(w, 0, 6);
                 }
             }
+            Ok(())
+        }
+        Some("tex") => {
+            // tex <client> <package> <object> <out.png>
+            let mut lib = ue2::library::Library::new(&args[2])?;
+            let h = lib.find(&args[3], &args[4]).context("not found")?;
+            let t = ue2::texture::read_texture(&h.package, h.export)?;
+            println!("{} {}x{} {:?} split9 {:?} masked {} alpha {}", t.name, t.width, t.height, t.format, t.split9, t.masked, t.alpha);
+            image::save_buffer(&args[5], &t.rgba, t.width, t.height, image::ColorType::Rgba8)?;
             Ok(())
         }
         Some("datdump") => Ok(std::fs::write(&args[3], ue2::dat::read_dat(&args[2])?)?),

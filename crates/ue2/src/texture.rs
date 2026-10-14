@@ -66,6 +66,9 @@ pub struct Texture {
     /// `bMasked` / `bAlphaTexture`: alpha channel is meant as opacity.
     pub masked: bool,
     pub alpha: bool,
+    /// UI 9-slice borders (`Split9X1..3`, `Split9Y1..3`): left, middle and
+    /// right widths, then top, middle and bottom heights.
+    pub split9: Option<[i32; 6]>,
 }
 
 pub fn read_texture(pkg: &Package, export: usize) -> Result<Texture, Error> {
@@ -128,7 +131,11 @@ pub fn read_texture(pkg: &Package, export: usize) -> Result<Texture, Error> {
     }
     let flag = |n: &str| matches!(props.get(pkg, n), Some(crate::props::Value::Bool(true)));
     let (masked, alpha) = (flag("bMasked"), flag("bAlphaTexture"));
-    Ok(Texture { name, width: w as u32, height: h as u32, format, rgba, masked, alpha })
+    let split9 = props.bool(pkg, "bSplit9Texture").unwrap_or(false).then(|| {
+        let v = |n: &str| props.int(pkg, n).unwrap_or(0);
+        [v("Split9X1"), v("Split9X2"), v("Split9X3"), v("Split9Y1"), v("Split9Y2"), v("Split9Y3")]
+    });
+    Ok(Texture { name, width: w as u32, height: h as u32, format, rgba, masked, alpha, split9 })
 }
 
 /// Scans for `[i32 skip_pos][compact size][size bytes]` where skip_pos is the

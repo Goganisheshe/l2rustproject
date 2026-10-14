@@ -357,6 +357,7 @@ fn move_marker(
 }
 
 fn enter_world(
+    iface: Option<Res<crate::l2ui::Interface>>,
     mut commands: Commands,
     c: Res<Creation>,
     dp: Res<Datapack>,
@@ -392,9 +393,14 @@ fn enter_world(
         }
     }
     commands.entity(hero).insert((Hero { actor, class: c.index, stance: "1HS" }, stats));
-    spawn_hud(&mut commands);
+    // The original client windows (l2ui) replace the simple HUD when the
+    // client's interface.xdat is available.
+    if iface.is_none() {
+        spawn_hud(&mut commands);
+    }
     commands.spawn((
         HudText,
+        if iface.is_some() && std::env::var_os("L2_COORDS").is_none() { Visibility::Hidden } else { Visibility::Inherited },
         Text::new(""),
         TextFont { font_size: FontSize::Px(18.0), ..default() },
         Node { position_type: PositionType::Absolute, top: Val::Px(10.0), left: Val::Px(10.0), ..default() },

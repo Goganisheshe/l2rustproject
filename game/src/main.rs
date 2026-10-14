@@ -2,6 +2,8 @@
 
 mod input;
 mod items;
+mod l2ui;
+mod l2ui_bind;
 mod character;
 mod classchange;
 mod collision;
@@ -49,6 +51,7 @@ fn main() {
         app.add_plugins(viewer::ViewerPlugin { spec });
     } else {
         app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin, save::SavePlugin, npcskills::NpcSkillsPlugin, skillwindow::SkillWindowPlugin, loot::LootPlugin, statswindow::StatusWindowPlugin, worldmap::WorldMapPlugin));
+        app.add_plugins((l2ui::L2UiPlugin, l2ui_bind::L2UiBindPlugin));
     }
     app.run();
 }

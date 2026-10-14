@@ -363,10 +363,15 @@ fn update_hotbar(
     mut images: ResMut<Assets<Image>>,
     hero: Single<&HeroSkills, With<Hero>>,
     root: Option<Single<Entity, With<HotbarRoot>>>,
+    iface: Option<Res<crate::l2ui::Interface>>,
     slots: Query<Entity, With<HotbarSlot>>,
     mut icon_cache: Local<HashMap<String, Option<Handle<Image>>>>,
     mut shown: Local<Vec<(u32, u32, bool)>>,
 ) {
+    // The client's shortcut window shows the hotbar (l2ui_bind).
+    if iface.is_some() {
+        return;
+    }
     let Some(root) = root else {
         commands.spawn((
             HotbarRoot,
