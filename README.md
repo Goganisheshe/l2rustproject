@@ -27,6 +27,12 @@ each assembled from the client's face, hair and starter-armor parts and
 holding a class weapon (sword, rod, club, tomahawk or knife) on
 `Weapon_R_Bone`. Standing still, the hero turns and swings at each volley.
 
+Skills come from the client's tables: 1 673 offensive skills (661 magic for
+mystics, 1 012 physical for fighters) can be learned on level-up, each cast
+with the character's own combo animation (e.g. Wind Strike: CastMid ->
+CastEnd -> MagicShot) and its client effects (cast, flight, impact). Waves
+rotate through 683 monster kinds from `npcgrp.dat` with their textures.
+
 Controls: WASD / arrows or the left stick / D-pad to move or pick, Enter /
 Space or gamepad A to confirm, Esc or Start to pause. Attacks are automatic.
 
@@ -36,6 +42,11 @@ Environment variables:
 - `L2_GROUND=<package>:<texture>` — ground texture, e.g.
   `ertheia_v_t:ertheia_a_ground00` (default).
 - `L2_CLASS=<prefix>` — skip the character screen, e.g. `FElf`, `MKamael`.
+- `L2_SKILLS=<id,id,...>` — starting skills, e.g. `1177,1239`.
+- `L2_LIST_SKILLS=<file>` — write the playable skill table (id, name,
+  animations, effects) and continue.
+- `L2_ZOOM=<k>` — camera distance factor (e.g. `0.35` for a close-up).
+- `L2_FONT=<ttf>` — UI font (default: Segoe UI / Arial for Cyrillic names).
 - `L2_MODEL=<package>:<mesh>[:<clip>]` — model viewer instead of the game,
   e.g. `lineagemonsters:orc_m00:atk01`; `class:<prefix>[:clip]` shows an
   assembled player character. Several meshes can be joined with `+`, and
@@ -45,7 +56,8 @@ Environment variables:
   sweeping along +X, e.g. `el_wind_strike_fl`.
 - `L2_VIEW=<package>:<static mesh>` — place one static mesh next to the start.
 - `L2_SCREENSHOT=<file.png>` — save a frame after `L2_SCREENSHOT_AT` seconds
-  (default 8) and quit. `L2_AUTOPILOT=1` walks the player in a circle.
+  (default 8) and quit; `L2_SCREENSHOT_COUNT` / `L2_SCREENSHOT_STEP` take a
+  burst (`shot_0.png`, ...). `L2_AUTOPILOT=1` walks the player in a circle.
 
 ## l2tool
 
@@ -58,6 +70,10 @@ cargo run --release -p l2tool -- obj <package> <mesh> <out.obj> # static mesh to
 cargo run --release -p l2tool -- materials <client> <package> <mesh>  # static or skeletal
 cargo run --release -p l2tool -- bones <client> <package> <skeletal mesh>
 cargo run --release -p l2tool -- alpha <client> <package> <material>
+cargo run --release -p l2tool -- dat <client>                # decode skillgrp/npcgrp/... and summarize
+cargo run --release -p l2tool -- props <package> <export>     # tagged properties
+cargo run --release -p l2tool -- defaults <package> <class>   # class default properties
+cargo run --release -p l2tool -- effect <package> <class>     # effect emitters
 cargo run --release -p l2tool -- hex <package> <export> [n]
 ```
 
@@ -67,7 +83,13 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   start with the UTF-16 header `Lineage2Ver111` or `Lineage2Ver121` followed by
   the package XORed with one byte (0xAC for 111, name-derived for 121). The key
   is recovered from the package magic `0x9E2A83C1`.
-- `.dat`/`.ini` in `system` use `Lineage2Ver413` (RSA + zlib), not handled yet.
+- `.dat` files in `system` use `Lineage2Ver413`: 128-byte RSA blocks (public
+  exponent 0x1d, modulus in `ue2::dat`), each holding a length byte and
+  payload, then zlib. Strings are indices into `L2GameDataName.dat`. Layouts
+  match the L2ClientDat definitions: skillgrp "Salvation", npcgrp
+  "GrandCrusade", skillname/animationcombo "Helios" (each file ends with a
+  `SafePackage` marker). `tools/datparse.py` probes layouts against those XML
+  definitions.
 - Package versions range from 117 to 132 (licensee 0 to 40).
 - Newer textures carry extra Lineage data (padding, material path, HLSL
   snippet) between properties and mips; the reader finds mip 0 by its
@@ -101,3 +123,12 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   structs (`Range`, `RangeVector`, array elements) are nested tagged streams,
   native ones (`Vector`, `Color`) are raw. `game/src/effects.rs` plays sprite and
   mesh emitters (beams/trails are skipped).
+- Skill visuals: `skillgrp` gives an animation combo code (`E`, `S`, `SMB01`;
+  some single letters share a string slot shown as `L2Day - E`).
+  `animationcombo` maps it to pawn variables (`CastMidAnimName`...), whose clip
+  is `<base>[_<weapon>]_<race>` on the character. `lineageskilleffect.u`
+  class `l2_<id>_skill` holds `CastingAction`/`ShotAction`/`ExplosionAction`
+  arrays of `L2EffectEmitter` (EffectClass, AttachOn, offset, bSpawnOnTarget)
+  and `FlyingTime`; defaults are found by scanning for a clean property stream.
+- Effect draw styles: Darken = dst * (1 - src) is emitted as black with alpha =
+  source brightness; Modulated approximated with multiply.

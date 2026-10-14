@@ -188,15 +188,22 @@ fn build_model(
     // `mesh_name` may list several parts joined by '+', e.g. a face, hair and
     // armor pieces of a player character. They share one skeleton, merged by
     // bone name; the first part provides the actor transform. A part can force
-    // its material with `mesh@package/material`: player faces and hair get
-    // theirs assigned at runtime by the client, so the mesh has none.
+    // its materials with `mesh@package/material[|package/material...]` (one
+    // per material slot; the last repeats): player faces and hair get theirs
+    // at runtime from the client, and monsters take theirs from npcgrp.
     let l = lib.lib.as_mut()?;
     let mut loaded = Vec::new();
-    let mut overrides: Vec<Option<(String, String)>> = Vec::new();
+    let mut overrides: Vec<Vec<(String, String)>> = Vec::new();
     for spec in mesh_name.split('+').filter(|p| !p.is_empty()) {
         let (part, ovr) = match spec.split_once('@') {
-            Some((p, m)) => (p, m.split_once('/').map(|(a, b)| (a.to_string(), b.to_string()))),
-            None => (spec, None),
+            Some((p, m)) => (
+                p,
+                m.split('|')
+                    .filter_map(|x| x.split_once('/'))
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect(),
+            ),
+            None => (spec, Vec::new()),
         };
         let Some(h) = l.find(package, part) else {
             warn!("{package}:{part} not found");
@@ -269,13 +276,16 @@ fn build_model(
     let mut parts = Vec::new();
     let mut total_verts = 0;
     for (((ph, m), remap), ovr) in loaded.iter().zip(&remaps).zip(&overrides) {
-        let forced = ovr.as_ref().and_then(|(p, o)| {
-            let mat = lib.material_by_name(p, o, materials, images);
-            if mat.is_none() {
-                warn!("material override {p}/{o} not found");
-            }
-            mat
-        });
+        let forced: Vec<Option<Handle<StandardMaterial>>> = ovr
+            .iter()
+            .map(|(p, o)| {
+                let mat = lib.material_by_name(p, o, materials, images);
+                if mat.is_none() {
+                    warn!("material override {p}/{o} not found");
+                }
+                mat
+            })
+            .collect();
         total_verts += m.positions.len();
         let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| ue_pos(p).to_array()).collect();
         let normals: Vec<[f32; 3]> = m.normals.iter().map(|&n| Vec3::new(n[0], n[2], n[1]).to_array()).collect();
@@ -291,8 +301,9 @@ fn build_model(
             mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, m.weights.clone());
             mesh.insert_indices(Indices::U32(m.indices[range].to_vec()));
             let Ok(mesh) = mesh.with_generated_skinned_mesh_bounds() else { continue };
-            let material = match &forced {
-                Some(f) => f.clone(),
+            let slot = forced.get(s.material.min(forced.len().saturating_sub(1))).cloned().flatten();
+            let material = match slot {
+                Some(f) => f,
                 None => {
                     let mat_ref = m.materials.get(s.material).copied().unwrap_or_default();
                     lib.material(&ph.package, mat_ref, materials, images)

@@ -15,7 +15,29 @@ use ue2::effect::{EmitterDef, EmitterKind};
 use crate::l2assets::{to_image, L2Library, MeshPart, UU_TO_M};
 
 /// Script packages that hold effect classes, searched in order.
-const EFFECT_PACKAGES: &[&str] = &["lineageeffect", "lineageeffect2", "lineageskilleffect", "lineageeffect_br"];
+const EFFECT_PACKAGES: &[&str] = &[
+    "lineageeffect",
+    "lineageeffect2",
+    "lineageeffect_br",
+    "lineageskilleffect",
+    "la2worldeffect",
+    "la2world_effect",
+    "lineagemonster",
+    "lineagemonster2",
+    "lineagemonster3",
+    "lineagemonster4",
+    "lineagemonster5",
+    "lineagemonster6",
+    "lineagemonster7",
+    "lineagemonster8",
+    "lineagemonster9",
+    "lineagemonster10",
+    "lineagemonster11",
+    "lineagemonster12",
+    "lineagemonster13",
+    "lineagemonster99",
+    "lineagenpc",
+];
 
 /// Hard cap per emitter instance, to keep hordes of projectiles affordable.
 const MAX_PARTICLES_PER_EMITTER: u32 = 40;
@@ -91,7 +113,26 @@ fn build(
         let visual = match def.kind {
             EmitterKind::Sprite => {
                 let l = lib.lib.as_mut()?;
-                let Some(tex) = l.resolve(&pkg, def.texture).and_then(|h| l.diffuse_texture(&h)) else { continue };
+                let Some(mut tex) = l.resolve(&pkg, def.texture).and_then(|h| l.diffuse_texture(&h)) else { continue };
+                // UE2 "Darken" is dst * (1 - src): a black texture whose alpha is
+                // the source brightness gives exactly that with alpha blending.
+                // "Modulated" (dst * src * 2) is approximated by multiplying with
+                // a brightened texture.
+                match def.draw_style {
+                    5 => tex.rgba.chunks_exact_mut(4).for_each(|p| {
+                        let luma = (p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10;
+                        p[3] = (luma * p[3] as u32 / 255) as u8;
+                        p[0] = 0;
+                        p[1] = 0;
+                        p[2] = 0;
+                    }),
+                    2 => tex.rgba.chunks_exact_mut(4).for_each(|p| {
+                        p[0] = p[0].saturating_mul(2);
+                        p[1] = p[1].saturating_mul(2);
+                        p[2] = p[2].saturating_mul(2);
+                    }),
+                    _ => {}
+                }
                 Visual::Sprite { image: images.add(to_image(tex, false)) }
             }
             EmitterKind::Mesh => {
@@ -300,8 +341,8 @@ fn spin_radians(v: f32) -> f32 {
 
 fn blend(d: &EmitterDef) -> AlphaMode {
     match d.draw_style {
-        1 | 4 => AlphaMode::Blend,
-        2 | 5 => AlphaMode::Multiply,
+        1 | 4 | 5 => AlphaMode::Blend,
+        2 => AlphaMode::Multiply,
         _ => AlphaMode::Add,
     }
 }
@@ -415,11 +456,15 @@ fn update_particles(
         }
         let c = [rgba[0] * p.color[0], rgba[1] * p.color[1], rgba[2] * p.color[2]];
         if let Some(mut m) = p.material.as_ref().and_then(|h| materials.get_mut(h)) {
-            m.base_color = if matches!(m.alpha_mode, AlphaMode::Add) {
+            m.base_color = match m.alpha_mode {
                 // Additive: fading means darkening.
-                Color::srgb(c[0] * alpha, c[1] * alpha, c[2] * alpha)
-            } else {
-                Color::srgba(c[0], c[1], c[2], alpha)
+                AlphaMode::Add => Color::srgb(c[0] * alpha, c[1] * alpha, c[2] * alpha),
+                // Multiply: fading means going toward white (no effect).
+                AlphaMode::Multiply => {
+                    let f = |x: f32| 1.0 - (1.0 - x) * alpha;
+                    Color::srgb(f(c[0]), f(c[1]), f(c[2]))
+                }
+                _ => Color::srgba(c[0], c[1], c[2], alpha),
             };
         }
     }

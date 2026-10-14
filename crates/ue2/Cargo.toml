@@ -6,3 +6,5 @@ edition.workspace = true
 [dependencies]
 thiserror = "2"
 texpresso = "2"
+num-bigint = "0.5.1"
+flate2 = "1.1.10"

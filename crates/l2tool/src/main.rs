@@ -14,6 +14,8 @@ fn main() -> Result<()> {
         Some("alpha") => mat_alpha(&args[2], &args[3], &args[4]),
         Some("props") => dump_props(&args[2], &args[3]),
         Some("effect") => dump_effect(&args[2], &args[3]),
+        Some("defaults") => class_defaults(&args[2], &args[3]),
+        Some("dat") => dat_summary(&args[2]),
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
@@ -342,6 +344,70 @@ pub fn dump_effect(path: &str, class: &str) -> Result<()> {
             e.size_scale,
             e.color_scale.len()
         );
+    }
+    Ok(())
+}
+
+/// Finds a class's default properties by scanning for an offset where a
+/// tagged property stream parses cleanly up to the end of the export.
+pub fn class_defaults(path: &str, class: &str) -> Result<()> {
+    let pkg = Package::open(path)?;
+    let idx = (0..pkg.exports.len())
+        .find(|&i| pkg.class_name(&pkg.exports[i]) == "Class" && pkg.name(pkg.exports[i].object_name).eq_ignore_ascii_case(class))
+        .with_context(|| format!("no class {class}"))?;
+    let data = pkg.export_data(idx);
+    for start in 0..data.len() {
+        let mut r = ue2::Reader::at(data, start);
+        if let Ok(p) = ue2::props::Properties::read(&pkg, &mut r) {
+            if r.remaining() == 0 && !p.0.is_empty() {
+                println!("defaults at {start}/{}", data.len());
+                for prop in &p.0 {
+                    let v = match &prop.value {
+                        ue2::props::Value::Object(o) => pkg.full_name(ue2::ObjectRef::from_raw(*o)),
+                        ue2::props::Value::Raw { data, .. } => format!("raw {} bytes {:02x?}", data.len(), &data[..data.len().min(48)]),
+                        v => format!("{v:?}"),
+                    };
+                    println!("  {}[{}] = {v}", pkg.name(prop.name), prop.index);
+                }
+                return Ok(());
+            }
+        }
+    }
+    println!("no defaults found");
+    Ok(())
+}
+
+/// Decodes the client data tables and prints a summary.
+pub fn dat_summary(client: &str) -> Result<()> {
+    use ue2::dat::*;
+    let sys = std::path::Path::new(client).join("system");
+    let names = GameDataNames::parse(&read_dat(sys.join("l2gamedataname.dat"))?)?;
+    println!("names: {}", names.0.len());
+    let skills = parse_skillgrp(&read_dat(sys.join("skillgrp.dat"))?, &names)?;
+    println!("skillgrp: {} entries", skills.len());
+    let skill_names = parse_skillname(&read_dat(sys.join("skillname-ru.dat"))?)?;
+    println!("skillname: {} entries", skill_names.len());
+    let combos = parse_animationcombo(&read_dat(sys.join("animationcombo.dat"))?, &names)?;
+    println!("animationcombo: {} entries", combos.len());
+    let npcs = parse_npcgrp(&read_dat(sys.join("npcgrp.dat"))?, &names)?;
+    println!("npcgrp: {} entries", npcs.len());
+    for s in skills.iter().filter(|s| matches!(s.id, 3 | 1177 | 1011) && s.level == 1) {
+        println!(
+            "  skill {} {:?}: anims {:?} -> {:?}, visual {}, icon {}, ep {}, magic {}, op {}, hit {}",
+            s.id,
+            skill_names.get(&(s.id, 1)),
+            s.animations,
+            s.animations.iter().map(|a| combos.get(a).map(|c| c.anims.clone())).collect::<Vec<_>>(),
+            s.visual_effect,
+            s.icon,
+            s.effect_point,
+            s.is_magic,
+            s.operate_type,
+            s.hit_time
+        );
+    }
+    for n in npcs.iter().filter(|n| n.mesh.to_ascii_lowercase().contains("gremlin")).take(3) {
+        println!("  npc {:?}", n);
     }
     Ok(())
 }

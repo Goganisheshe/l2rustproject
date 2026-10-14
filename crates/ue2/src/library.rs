@@ -79,17 +79,18 @@ impl Library {
     pub fn resolve(&mut self, pkg: &Arc<Package>, r: ObjectRef) -> Option<ObjectHandle> {
         match r {
             ObjectRef::Null => None,
-            ObjectRef::Export(i) => Some(ObjectHandle { package: pkg.clone(), export: i }),
+            ObjectRef::Export(i) => (i < pkg.exports.len()).then(|| ObjectHandle { package: pkg.clone(), export: i }),
             ObjectRef::Import(i) => {
-                let imp = &pkg.imports[i];
+                let imp = pkg.imports.get(i)?;
                 let class = pkg.name(imp.class_name).to_string();
                 let object = pkg.name(imp.object_name).to_string();
                 // Walk to the outermost package; collect group path on the way.
                 let mut outer = imp.package;
                 let mut top = None;
                 while let ObjectRef::Import(j) = outer {
-                    top = Some(pkg.name(pkg.imports[j].object_name).to_string());
-                    outer = pkg.imports[j].package;
+                    let parent = pkg.imports.get(j)?;
+                    top = Some(pkg.name(parent.object_name).to_string());
+                    outer = parent.package;
                 }
                 let target = self.package(&top?)?;
                 let export = (0..target.exports.len()).find(|&e| {

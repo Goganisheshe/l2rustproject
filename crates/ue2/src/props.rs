@@ -168,3 +168,25 @@ impl Properties {
     }
 }
 
+
+impl Properties {
+    /// Dynamic array of object references (compact count + compact refs).
+    pub fn object_array(&self, pkg: &Package, name: &str) -> Vec<crate::ObjectRef> {
+        let Some(data) = self.raw(pkg, name) else { return Vec::new() };
+        let mut r = Reader::new(data);
+        let Ok(n) = r.compact() else { return Vec::new() };
+        (0..n.max(0)).map_while(|_| r.compact().ok().map(crate::ObjectRef::from_raw)).collect()
+    }
+}
+
+/// Default properties of a UClass export. The class body before them
+/// (bytecode, state data) is version-specific, so we look for the offset
+/// where a tagged property stream parses cleanly to the end of the export.
+pub fn class_defaults(pkg: &Package, export: usize) -> Option<Properties> {
+    let data = pkg.export_data(export);
+    (0..data.len()).find_map(|start| {
+        let mut r = Reader::at(data, start);
+        let p = Properties::read(pkg, &mut r).ok()?;
+        (r.remaining() == 0 && !p.0.is_empty()).then_some(p)
+    })
+}

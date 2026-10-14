@@ -120,8 +120,8 @@ impl Package {
     pub fn object_name(&self, r: ObjectRef) -> &str {
         match r {
             ObjectRef::Null => "None",
-            ObjectRef::Export(i) => self.name(self.exports[i].object_name),
-            ObjectRef::Import(i) => self.name(self.imports[i].object_name),
+            ObjectRef::Export(i) => self.exports.get(i).map_or("<bad-ref>", |e| self.name(e.object_name)),
+            ObjectRef::Import(i) => self.imports.get(i).map_or("<bad-ref>", |e| self.name(e.object_name)),
         }
     }
 
@@ -137,8 +137,8 @@ impl Package {
     pub fn full_name(&self, r: ObjectRef) -> String {
         let (name, outer) = match r {
             ObjectRef::Null => return "None".into(),
-            ObjectRef::Export(i) => (self.object_name(r), self.exports[i].package),
-            ObjectRef::Import(i) => (self.object_name(r), self.imports[i].package),
+            ObjectRef::Export(i) => (self.object_name(r), self.exports.get(i).map_or(ObjectRef::Null, |e| e.package)),
+            ObjectRef::Import(i) => (self.object_name(r), self.imports.get(i).map_or(ObjectRef::Null, |e| e.package)),
         };
         match outer {
             ObjectRef::Null => name.to_string(),
@@ -146,9 +146,10 @@ impl Package {
         }
     }
 
+    /// Serialized bytes of an export (empty for out-of-range indices).
     pub fn export_data(&self, idx: usize) -> &[u8] {
-        let e = &self.exports[idx];
-        &self.data[e.serial_offset..e.serial_offset + e.serial_size]
+        let Some(e) = self.exports.get(idx) else { return &[] };
+        self.data.get(e.serial_offset..e.serial_offset + e.serial_size).unwrap_or(&[])
     }
 
     pub fn exports_of_class<'a>(&'a self, class: &'a str) -> impl Iterator<Item = usize> + 'a {

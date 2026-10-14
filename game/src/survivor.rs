@@ -1,5 +1,5 @@
-//! Vampire Survivors style loop: move, auto-attack, collect XP, pick upgrades,
-//! survive escalating waves.
+//! Vampire Survivors style loop: move, auto-cast Lineage skills, collect XP,
+//! pick new skills or upgrades, survive escalating waves of client monsters.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
@@ -16,40 +16,26 @@ use crate::character::{find_class, part_spec, CLASSES};
 use crate::l2assets::{L2Library, L2Textures};
 use crate::character::weapon_spec;
 use crate::effects::{spawn_effect, EffectAsset, EffectCache};
+use crate::gamedata::{FxSpec, GameData, MonsterKind, SkillDef};
 
-/// Skill effects from the client: (cast for fighters, cast for mystics,
-/// projectile flight, impact).
-const FX_CAST_FIGHTER: &str = "soul_N_stick";
-const FX_CAST_MYSTIC: &str = "el_wind_strike_ca";
-const FX_FLIGHT: &str = "el_wind_strike_fl";
-const FX_HIT: &str = "el_wind_strike_ta";
-
-#[derive(Resource, Default)]
-struct Fx {
-    cast_fighter: Option<Arc<EffectAsset>>,
-    cast_mystic: Option<Arc<EffectAsset>>,
-    flight: Option<Arc<EffectAsset>>,
-    hit: Option<Arc<EffectAsset>>,
-}
 use crate::skinned::{spawn_model, Animated, Attachment, Model, ModelCache};
 
-
-/// Enemy roster: (package, mesh, hp multiplier, speed, unlock minute).
-const ENEMY_KINDS: &[(&str, &str, f32, f32, f32)] = &[
-    ("lineagemonsters", "gremlin_m00", 0.7, 3.0, 0.0),
-    ("lineagemonsters", "Fox_m00", 0.5, 3.8, 0.0),
-    ("lineagemonsters", "hobgoblin_m00", 1.3, 2.6, 0.5),
-    ("lineagemonsters", "orc_m00", 2.0, 2.4, 1.0),
-    ("lineagemonsters", "orc_fighter_m00", 3.0, 2.6, 2.0),
-];
 
 #[derive(Resource, Default)]
 struct Roster {
     player: Option<Arc<Model>>,
     /// Weapon geometry for the chosen class, hung on `Weapon_R_Bone`.
     weapon: Vec<crate::l2assets::MeshPart>,
-    enemies: Vec<(Arc<Model>, f32, f32, f32)>,
+    /// Monster kinds in the current wave rotation.
+    enemies: Vec<(Arc<Model>, MonsterKind)>,
 }
+
+/// Starting skills: Wind Strike for mystics, Power Strike for fighters.
+const START_MAGIC: u32 = 1177;
+const START_PHYSICAL: u32 = 3;
+/// Monster kinds active at once; a new one rotates in every `WAVE_SECONDS`.
+const ACTIVE_KINDS: usize = 6;
+const WAVE_SECONDS: f32 = 40.0;
 
 impl Roster {
     fn attachments(&self) -> Vec<Attachment> {
@@ -107,6 +93,7 @@ struct Enemy {
     hp: f32,
     speed: f32,
     damage: f32,
+    radius: f32,
 }
 
 #[derive(Component)]
@@ -115,13 +102,12 @@ struct Projectile {
     damage: f32,
     pierce: u32,
     life: f32,
+    /// Explosion effects of the skill, played on each hit.
+    explosion: Vec<(FxSpec, Arc<EffectAsset>)>,
 }
 
 #[derive(Component)]
 struct Gem(u32);
-
-#[derive(Component)]
-struct Aura;
 
 #[derive(Component)]
 struct Hud;
@@ -144,16 +130,12 @@ struct Run {
     kills: u32,
     time: f32,
     magnet: f32,
-    bolt_damage: f32,
-    bolt_cooldown: f32,
-    bolt_count: u32,
-    bolt_pierce: u32,
-    bolt_timer: f32,
-    /// Set when a volley fires; the player swings toward it if standing still.
-    swing: Option<Vec3>,
-    aura_radius: f32,
-    aura_dps: f32,
+    damage_mult: f32,
+    cooldown_mult: f32,
+    cast_speed: f32,
+    pierce: u32,
     spawn_timer: f32,
+    wave_timer: f32,
     contact_cooldown: f32,
 }
 
@@ -169,70 +151,73 @@ impl Default for Run {
             kills: 0,
             time: 0.0,
             magnet: 2.5,
-            bolt_damage: 10.0,
-            bolt_cooldown: 0.9,
-            bolt_count: 1,
-            bolt_pierce: 0,
-            bolt_timer: 0.0,
-            swing: None,
-            aura_radius: 0.0,
-            aura_dps: 0.0,
+            damage_mult: 1.0,
+            cooldown_mult: 1.0,
+            cast_speed: 1.25,
+            pierce: 0,
             spawn_timer: 0.0,
+            wave_timer: 0.0,
             contact_cooldown: 0.0,
         }
     }
 }
 
+/// Passive upgrades offered next to new skills.
 #[derive(Clone, Copy, Debug)]
-enum Upgrade {
-    Damage,
-    FireRate,
-    Multishot,
-    Pierce,
-    Aura,
+enum Passive {
+    Might,
+    Haste,
+    Acumen,
+    Piercing,
     Speed,
     Magnet,
     Vitality,
 }
 
-impl Upgrade {
-    const ALL: [Upgrade; 8] = [
-        Upgrade::Damage,
-        Upgrade::FireRate,
-        Upgrade::Multishot,
-        Upgrade::Pierce,
-        Upgrade::Aura,
-        Upgrade::Speed,
-        Upgrade::Magnet,
-        Upgrade::Vitality,
+impl Passive {
+    const ALL: [Passive; 7] = [
+        Passive::Might,
+        Passive::Haste,
+        Passive::Acumen,
+        Passive::Piercing,
+        Passive::Speed,
+        Passive::Magnet,
+        Passive::Vitality,
     ];
 
     fn label(self) -> &'static str {
         match self {
-            Upgrade::Damage => "Wind Strike: +30% damage",
-            Upgrade::FireRate => "Haste: -15% cooldown",
-            Upgrade::Multishot => "Soulshot: +1 bolt",
-            Upgrade::Pierce => "Piercing: bolts pass +1 enemy",
-            Upgrade::Aura => "Aura of Hate: damage nearby",
-            Upgrade::Speed => "Wind Walk: +12% move speed",
-            Upgrade::Magnet => "Greed: +40% pickup radius",
-            Upgrade::Vitality => "Vitality: +20 max HP, heal",
+            Passive::Might => "Might: +20% skill damage",
+            Passive::Haste => "Haste: -12% skill reuse",
+            Passive::Acumen => "Acumen: +20% casting speed",
+            Passive::Piercing => "Piercing: projectiles pass +1 enemy",
+            Passive::Speed => "Wind Walk: +12% move speed",
+            Passive::Magnet => "Greed: +40% pickup radius",
+            Passive::Vitality => "Vitality: +20 max HP, heal",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Passive::Might => "icon.skill1068",
+            Passive::Haste => "icon.skill1086",
+            Passive::Acumen => "icon.skill1085",
+            Passive::Piercing => "icon.skill0056",
+            Passive::Speed => "icon.skill1204",
+            Passive::Magnet => "icon.skill1040",
+            Passive::Vitality => "icon.skill1045",
         }
     }
 
     fn apply(self, run: &mut Run) {
         match self {
-            Upgrade::Damage => run.bolt_damage *= 1.3,
-            Upgrade::FireRate => run.bolt_cooldown *= 0.85,
-            Upgrade::Multishot => run.bolt_count += 1,
-            Upgrade::Pierce => run.bolt_pierce += 1,
-            Upgrade::Aura => {
-                run.aura_radius = if run.aura_radius == 0.0 { 2.0 } else { run.aura_radius * 1.2 };
-                run.aura_dps += 12.0;
-            }
-            Upgrade::Speed => run.speed *= 1.12,
-            Upgrade::Magnet => run.magnet *= 1.4,
-            Upgrade::Vitality => {
+            Passive::Might => run.damage_mult *= 1.2,
+            Passive::Haste => run.cooldown_mult *= 0.88,
+            Passive::Acumen => run.cast_speed *= 1.2,
+            Passive::Piercing => run.pierce += 1,
+            Passive::Speed => run.speed *= 1.12,
+            Passive::Magnet => run.magnet *= 1.4,
+            Passive::Vitality => {
                 run.max_hp += 20.0;
                 run.hp = run.max_hp;
             }
@@ -240,9 +225,16 @@ impl Upgrade {
     }
 }
 
+#[derive(Clone)]
+enum Choice {
+    NewSkill(Arc<SkillDef>),
+    SkillUp(usize),
+    Passive(Passive),
+}
+
 #[derive(Resource, Default)]
 struct LevelUpChoice {
-    options: Vec<Upgrade>,
+    options: Vec<Choice>,
     selected: usize,
 }
 
@@ -264,6 +256,10 @@ impl Plugin for SurvivorPlugin {
             .init_resource::<Run>()
             .init_resource::<LevelUpChoice>()
             .init_resource::<SelectState>()
+            .init_resource::<Loadout>()
+            .init_resource::<CastState>()
+            .init_resource::<FxLoader>()
+            .init_resource::<IconCache>()
             .add_systems(Startup, setup_world)
             .add_systems(OnEnter(GameState::Select), open_select)
             .add_systems(Update, select_menu.run_if(in_state(GameState::Select)))
@@ -272,12 +268,12 @@ impl Plugin for SurvivorPlugin {
                 Update,
                 (
                     move_player,
+                    cast_skills,
                     animate_player,
+                    grow_roster,
                     spawn_enemies,
                     move_enemies,
-                    fire_bolts,
                     move_bolts,
-                    aura_damage,
                     collect_gems,
                     enemy_contact,
                     tick_run,
@@ -286,7 +282,7 @@ impl Plugin for SurvivorPlugin {
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             )
-            .add_systems(Update, (follow_camera, update_hud, pause_toggle))
+            .add_systems(Update, (follow_camera, update_hud, update_skill_bar, pause_toggle))
             .add_systems(OnEnter(GameState::LevelUp), open_level_up)
             .add_systems(Update, level_up_menu.run_if(in_state(GameState::LevelUp)))
             .add_systems(OnExit(GameState::LevelUp), close_menu)
@@ -303,27 +299,10 @@ fn setup_world(
     textures: Res<L2Textures>,
     mut lib: ResMut<L2Library>,
     mut images: ResMut<Assets<Image>>,
-    mut cache: ResMut<ModelCache>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
-    mut fx_cache: ResMut<EffectCache>,
 ) {
-    let mut load_fx = |name: &str| fx_cache.load(&mut lib, name, &mut meshes, &mut materials, &mut images);
-    let fx = Fx {
-        cast_fighter: load_fx(FX_CAST_FIGHTER),
-        cast_mystic: load_fx(FX_CAST_MYSTIC),
-        flight: load_fx(FX_FLIGHT),
-        hit: load_fx(FX_HIT),
-    };
-    commands.insert_resource(fx);
-
-    // Characters from the client's skeletal meshes.
-    let mut roster = Roster::default();
-    for &(p, m, hp, speed, unlock) in ENEMY_KINDS {
-        if let Some(model) = cache.load(&mut lib, p, m, None, &mut meshes, &mut materials, &mut images, &mut bindposes) {
-            roster.enemies.push((model, hp, speed, unlock));
-        }
-    }
-    commands.insert_resource(roster);
+    let _ = &mut bindposes;
+    commands.insert_resource(Roster::default());
 
     // Huge tiled ground using a texture straight from the original client.
     let ground_size = 400.0;
@@ -406,6 +385,17 @@ fn setup_world(
         TextFont { font_size: FontSize::Px(22.0), ..default() },
         Node { position_type: PositionType::Absolute, top: Val::Px(12.0), left: Val::Px(12.0), ..default() },
     ));
+    commands.spawn((
+        SkillBar,
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(16.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        },
+    ));
 }
 
 fn start_run(
@@ -413,12 +403,31 @@ fn start_run(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     old: Query<Entity, With<RunEntity>>,
-    roster: Res<Roster>,
+    mut roster: ResMut<Roster>,
+    data: Res<GameData>,
+    select: Res<SelectState>,
 ) {
     for e in &old {
         commands.entity(e).despawn();
     }
     commands.insert_resource(Run::default());
+    commands.insert_resource(CastState::default());
+    roster.enemies.clear();
+    let mystic = is_mystic(select.index);
+    let start = data
+        .skill(if mystic { START_MAGIC } else { START_PHYSICAL })
+        .or_else(|| data.skills.iter().find(|s| s.magic == mystic))
+        .cloned();
+    // L2_SKILLS=<id,id,...> overrides the starting skills (for testing).
+    let forced: Vec<Arc<SkillDef>> = std::env::var("L2_SKILLS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|id| data.skill(id.trim().parse().ok()?).cloned())
+        .collect();
+    let start: Vec<Arc<SkillDef>> = if forced.is_empty() { start.into_iter().collect() } else { forced };
+    commands.insert_resource(Loadout {
+        skills: start.into_iter().map(|def| Owned { def, level: 1, cooldown: 0.0 }).collect(),
+    });
     let player = commands.spawn((Player, RunEntity, Transform::default(), Visibility::default())).id();
     match &roster.player {
         Some(model) => {
@@ -434,34 +443,29 @@ fn start_run(
             ));
         }
     }
-    commands
-        .entity(player)
-        .with_child((
-            Aura,
-            Mesh3d(meshes.add(Annulus::new(0.95, 1.0))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgba(1.0, 0.3, 0.2, 0.5),
-                emissive: LinearRgba::rgb(3.0, 0.6, 0.3),
-                alpha_mode: AlphaMode::Blend,
-                unlit: true,
-                ..default()
-            })),
-            Transform::from_xyz(0.0, 0.05, 0.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-            Visibility::Hidden,
-        ));
+    let _ = (&mut meshes, &mut materials);
+}
+
+fn is_mystic(index: usize) -> bool {
+    CLASSES.get(index).is_some_and(|c| c.prefix.contains("Magic") || c.prefix.contains("Shaman"))
 }
 
 fn move_player(
     time: Res<Time>,
     input: Res<PlayerInput>,
     run: Res<Run>,
+    cast: Res<CastState>,
     mut player: Single<&mut Transform, With<Player>>,
 ) {
-    // Stick/keyboard Y maps to "into the screen" (-Z).
+    // Stick/keyboard Y maps to "into the screen" (-Z). Casting slows you down
+    // and keeps you facing the target.
     let d = input.move_dir;
     let dir = Vec3::new(d.x, 0.0, -d.y);
-    player.translation += dir * run.speed * time.delta_secs();
-    face(&mut player, dir);
+    let speed = if cast.active.is_some() { run.speed * 0.35 } else { run.speed };
+    player.translation += dir * speed * time.delta_secs();
+    if cast.active.is_none() {
+        face(&mut player, dir);
+    }
 }
 
 /// Turns a ground entity toward `dir`. Lineage models face +X.
@@ -471,26 +475,49 @@ fn face(t: &mut Transform, dir: Vec3) {
     }
 }
 
-/// Picks run / idle clips for the player from movement input.
-/// Run while moving; when standing, swing the weapon on each volley and
-/// fall back to the combat stance once the swing ends.
+/// Player animation: the current skill's combo stage while casting (e.g.
+/// CastMid -> CastEnd -> MagicShot for Wind Strike, SpAtk01 for Power
+/// Strike), otherwise run or combat stance.
 fn animate_player(
     input: Res<PlayerInput>,
-    mut run: ResMut<Run>,
-    player: Single<(&ModelLink, &mut Transform), With<Player>>,
+    cast: Res<CastState>,
+    loadout: Res<Loadout>,
+    player: Single<&ModelLink, With<Player>>,
     mut anims: Query<&mut Animated>,
+    mut last: Local<Option<(usize, usize)>>,
 ) {
-    let swing = run.swing.take();
-    let (link, mut transform) = player.into_inner();
-    let Ok(mut anim) = anims.get_mut(link.0) else { return };
+    let Ok(mut anim) = anims.get_mut(player.0) else { return };
+    if let Some(c) = &cast.active {
+        let def = &loadout.skills[c.skill].def;
+        let key = (c.skill, c.stage);
+        let looped = c.stage == 0 && def.looped && def.anims.len() > 1;
+        if *last != Some(key) {
+            *last = Some(key);
+            let names = clip_candidates(&def.anims[c.stage]);
+            let names: Vec<&str> = names.iter().map(String::as_str).chain(["Atk01_1HS"]).collect();
+            anim.restart(&names, looped);
+            // Fit the clip into the stage time.
+            if let Some(len) = loadout_clip_len(&anim, &names) {
+                anim.speed = if looped { 1.0 } else { (len / c.stage_len.max(0.05)).clamp(0.5, 3.0) };
+            }
+        }
+        return;
+    }
+    *last = None;
+    anim.speed = 1.0;
     if input.move_dir.length() > 0.1 {
         anim.play(&["Run_1HS", "run"], true);
-    } else if let Some(aim) = swing {
-        face(&mut transform, aim);
-        anim.restart(&["Atk01_1HS", "atk01"], false);
     } else if anim.looping || anim.finished() {
         anim.play(&["AtkWait_1HS", "wait_1HS", "Wait"], true);
     }
+}
+
+fn loadout_clip_len(anim: &Animated, names: &[&str]) -> Option<f32> {
+    names.iter().find_map(|n| {
+        let i = anim.model.clip(n)?;
+        let c = &anim.model.clips[i];
+        Some(c.frames / if c.rate > 0.0 { c.rate } else { 30.0 })
+    })
 }
 
 /// Plays the death clip, then removes the corpse.
@@ -529,22 +556,28 @@ fn spawn_enemies(
     run.spawn_timer = (0.8 / (1.0 + minutes * 1.5)).max(0.08);
     let batch = 1 + (minutes * 2.0) as u32;
     let mut rng = rand::rng();
-    let unlocked: Vec<_> = roster.enemies.iter().filter(|e| e.3 <= minutes).collect();
     for _ in 0..batch {
         let a = rng.random_range(0.0..TAU);
         let pos = player.translation + Vec3::new(a.cos(), 0.0, a.sin()) * SPAWN_RADIUS;
-        let kind = (!unlocked.is_empty()).then(|| unlocked[rng.random_range(0..unlocked.len())]);
-        let (hp_mul, speed) = kind.map(|k| (k.1, k.2)).unwrap_or((1.0, rng.random_range(2.0..3.2)));
+        let kind = (!roster.enemies.is_empty()).then(|| &roster.enemies[rng.random_range(0..roster.enemies.len())]);
+        // Bigger monsters are tougher and slower.
+        let radius = kind.map(|k| k.1.radius).unwrap_or(ENEMY_RADIUS);
+        let size = (radius / 0.45).clamp(0.7, 2.5);
         let enemy = commands
             .spawn((
                 RunEntity,
-                Enemy { hp: 15.0 * hp_mul * (1.0 + minutes), speed: speed * rng.random_range(0.9..1.1), damage: 8.0 },
+                Enemy {
+                    hp: 10.0 * size * (1.0 + minutes),
+                    speed: (3.2 / size.sqrt()) * rng.random_range(0.85..1.1),
+                    damage: 3.0 + 1.5 * size,
+                    radius,
+                },
                 Transform::from_xyz(pos.x, 0.0, pos.z),
                 Visibility::default(),
             ))
             .id();
         match kind {
-            Some((model, ..)) => {
+            Some((model, _)) => {
                 let actor = spawn_model(&mut commands, model, enemy, "run", &[]);
                 commands.entity(enemy).insert(ModelLink(actor));
             }
@@ -579,65 +612,308 @@ fn move_enemies(
     }
 }
 
-fn fire_bolts(
+// ---------------------------------------------------------------------------
+// Skills: cast with the character's own animations, client effects, damage.
+// ---------------------------------------------------------------------------
+
+/// Skill owned by the player in this run.
+struct Owned {
+    def: Arc<SkillDef>,
+    level: u32,
+    cooldown: f32,
+}
+
+#[derive(Resource, Default)]
+struct Loadout {
+    skills: Vec<Owned>,
+}
+
+const MAX_SKILLS: usize = 6;
+
+/// The cast in progress: one animation stage after another, firing the
+/// skill at the start of the last stage (or mid-way for single clips).
+struct ActiveCast {
+    skill: usize,
+    target: Entity,
+    target_pos: Vec3,
+    stage: usize,
+    stage_time: f32,
+    stage_len: f32,
+    fired: bool,
+    started: bool,
+}
+
+#[derive(Resource, Default)]
+struct CastState {
+    active: Option<ActiveCast>,
+}
+
+impl ActiveCast {
+    fn fire_stage(&self, def: &SkillDef) -> usize {
+        def.anims.len().saturating_sub(1)
+    }
+}
+
+/// Clip names to try for a combo animation, most specific first: the
+/// weapon-type variant (we hold one-handed weapons), then the plain one.
+fn clip_candidates(base: &str) -> Vec<String> {
+    vec![format!("{base}_1HS"), base.to_string(), format!("{base}_Hand")]
+}
+
+fn clip_len(model: &Model, base: &str) -> Option<f32> {
+    clip_candidates(base).iter().find_map(|c| {
+        let i = model.clip(c)?;
+        let clip = &model.clips[i];
+        Some(clip.frames / if clip.rate > 0.0 { clip.rate } else { 30.0 })
+    })
+}
+
+/// Duration of a cast stage. Cast loops are shortened from the client's
+/// hit times (several seconds) to keep the survivor pace.
+fn stage_duration(def: &SkillDef, stage: usize, model: Option<&Model>, cast_speed: f32) -> f32 {
+    let natural = model.and_then(|m| clip_len(m, &def.anims[stage])).unwrap_or(0.6);
+    let len = if stage == 0 && def.looped && def.anims.len() > 1 {
+        (def.hit_time * 0.1).clamp(0.15, 0.45)
+    } else {
+        natural.clamp(0.15, 0.55)
+    };
+    len / cast_speed
+}
+
+fn skill_damage(def: &SkillDef, level: u32, run: &Run) -> f32 {
+    (def.power * 0.35).max(12.0) * (1.0 + 0.35 * (level as f32 - 1.0)) * run.damage_mult
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cast_skills(
     mut commands: Commands,
     time: Res<Time>,
-    mut run: ResMut<Run>,
+    run: Res<Run>,
+    mut loadout: ResMut<Loadout>,
+    mut cast: ResMut<CastState>,
+    mut fx: ResMut<FxLoader>,
+    mut lib: ResMut<L2Library>,
+    mut cache: ResMut<EffectCache>,
+    mut assets: (ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>, ResMut<Assets<Image>>),
     palette: Res<Palette>,
-    fx: Res<Fx>,
-    select: Res<SelectState>,
-    player: Single<(Entity, &Transform), With<Player>>,
-    enemies: Query<&Transform, With<Enemy>>,
+    roster: Res<Roster>,
+    player: Single<(Entity, &mut Transform), With<Player>>,
+    mut enemies: Query<(Entity, &mut Enemy, &Transform), Without<Player>>,
 ) {
-    let (player_entity, player) = player.into_inner();
-    run.bolt_timer -= time.delta_secs();
-    if run.bolt_timer > 0.0 {
-        return;
+    let dt = time.delta_secs();
+    for s in &mut loadout.skills {
+        s.cooldown -= dt;
     }
-    let origin = player.translation;
-    let Some(nearest) = enemies
-        .iter()
-        .min_by(|a, b| a.translation.distance_squared(origin).total_cmp(&b.translation.distance_squared(origin)))
-    else {
-        return;
-    };
-    run.bolt_timer = run.bolt_cooldown;
-    let aim = (nearest.translation - origin).with_y(0.0).normalize_or_zero();
-    run.swing = Some(aim);
-    let mystic = CLASSES.get(select.index).is_some_and(|c| c.prefix.contains("Magic") || c.prefix.contains("Shaman"));
-    let cast = if mystic { &fx.cast_mystic } else { &fx.cast_fighter };
-    if let Some(cast) = cast {
-        spawn_effect(&mut commands, cast, Transform::default(), Some(player_entity));
-    }
-    let n = run.bolt_count;
-    for i in 0..n {
-        let spread = (i as f32 - (n - 1) as f32 / 2.0) * 0.18;
-        let dir = Quat::from_rotation_y(spread) * aim;
-        let mut transform = Transform::from_translation(origin + Vec3::Y * 1.0);
-        face(&mut transform, dir);
-        let bolt = commands
-            .spawn((
-                RunEntity,
-                Projectile { velocity: dir * 14.0, damage: run.bolt_damage, pierce: run.bolt_pierce, life: 1.6 },
-                transform,
-                Visibility::default(),
-            ))
-            .id();
-        // A small glowing core keeps bolts readable over bright ground; the
-        // client's Wind Strike trail flies around it.
-        commands.entity(bolt).insert((Mesh3d(palette.bolt_mesh.clone()), MeshMaterial3d(palette.bolt_mat.clone())));
-        if let Some(flight) = &fx.flight {
-            spawn_effect(&mut commands, flight, transform, Some(bolt));
+    let (player_entity, mut player_tr) = player.into_inner();
+    let origin = player_tr.translation;
+    let (meshes, materials, images) = &mut assets;
+    let mut load = |name: &str| fx.get(name, &mut cache, &mut lib, meshes, materials, images);
+
+    if cast.active.is_none() {
+        // Start the first ready skill that has an enemy in range.
+        let mut pick = None;
+        for (i, s) in loadout.skills.iter().enumerate() {
+            if s.cooldown > 0.0 {
+                continue;
+            }
+            let reach = s.def.range.clamp(2.2, 14.0);
+            let nearest = enemies
+                .iter()
+                .map(|(e, _, t)| (e, t.translation, t.translation.distance(origin)))
+                .filter(|x| x.2 <= reach)
+                .min_by(|a, b| a.2.total_cmp(&b.2));
+            if let Some((e, pos, _)) = nearest {
+                pick = Some((i, e, pos));
+                break;
+            }
         }
+        if let Some((i, target, pos)) = pick {
+            cast.active = Some(ActiveCast {
+                skill: i,
+                target,
+                target_pos: pos,
+                stage: 0,
+                stage_time: 0.0,
+                stage_len: stage_duration(&loadout.skills[i].def, 0, roster.player.as_deref(), run.cast_speed),
+                fired: false,
+                started: false,
+            });
+        }
+    }
+
+    let Some(active) = cast.active.as_mut() else { return };
+    let def = loadout.skills[active.skill].def.clone();
+    let level = loadout.skills[active.skill].level;
+    if let Ok((_, _, t)) = enemies.get(active.target) {
+        active.target_pos = t.translation;
+    }
+    face(&mut player_tr, (active.target_pos - origin).with_y(0.0));
+
+    if !active.started {
+        active.started = true;
+        for spec in &def.casting {
+            if let Some(asset) = load(&spec.class) {
+                spawn_fx(&mut commands, &asset, spec, &player_tr, player_entity, active.target_pos);
+            }
+        }
+    }
+
+    active.stage_time += dt;
+    let fire_stage = active.fire_stage(&def);
+    let fire_now = !active.fired
+        && active.stage == fire_stage
+        && (def.anims.len() > 1 || active.stage_time >= active.stage_len * 0.45);
+    if fire_now {
+        active.fired = true;
+        let damage = skill_damage(&def, level, &run);
+        let aim = (active.target_pos - origin).with_y(0.0).normalize_or_zero();
+        let mut flyer = None;
+        for spec in &def.shot {
+            let Some(asset) = load(&spec.class) else { continue };
+            if def.flying_time > 0.0 && !spec.attached && !spec.on_target && flyer.is_none() {
+                flyer = Some(asset);
+            } else {
+                spawn_fx(&mut commands, &asset, spec, &player_tr, player_entity, active.target_pos);
+            }
+        }
+        let explosion: Vec<(FxSpec, Arc<EffectAsset>)> =
+            def.explosion.iter().filter_map(|s| Some((s.clone(), load(&s.class)?))).collect();
+        if def.flying_time > 0.0 {
+            let dist = origin.distance(active.target_pos).max(1.0);
+            let speed = (dist / def.flying_time).clamp(10.0, 28.0);
+            let mut tr = Transform::from_translation(origin + Vec3::Y * 1.1);
+            face(&mut tr, aim);
+            let bolt = commands
+                .spawn((
+                    RunEntity,
+                    Projectile { velocity: aim * speed, damage, pierce: run.pierce, life: 1.8, explosion },
+                    tr,
+                    Visibility::default(),
+                    Mesh3d(palette.bolt_mesh.clone()),
+                    MeshMaterial3d(palette.bolt_mat.clone()),
+                ))
+                .id();
+            if let Some(asset) = flyer {
+                spawn_effect(&mut commands, &asset, tr, Some(bolt));
+            }
+        } else {
+            // Instant skills strike the target and anything right next to it.
+            let center = active.target_pos.with_y(0.0);
+            let radius = if def.range < 3.0 { 1.6 } else { 1.2 };
+            for (e, mut enemy, t) in &mut enemies {
+                if enemy.hp <= 0.0 || t.translation.with_y(0.0).distance(center) > radius + enemy.radius {
+                    continue;
+                }
+                enemy.hp -= damage;
+                if enemy.hp <= 0.0 {
+                    commands.queue(Kill { enemy: e, at: t.translation });
+                }
+            }
+            for (spec, asset) in &explosion {
+                let mut at = Transform::from_translation(active.target_pos + Vec3::Y * 0.9 + spec.offset);
+                face(&mut at, -aim);
+                spawn_effect(&mut commands, asset, at, None);
+            }
+        }
+    }
+
+    let mut done = false;
+    if active.stage_time >= active.stage_len {
+        active.stage += 1;
+        active.stage_time = 0.0;
+        if active.stage >= def.anims.len() {
+            done = true;
+        } else {
+            active.stage_len = stage_duration(&def, active.stage, roster.player.as_deref(), run.cast_speed);
+        }
+    }
+    if done {
+        let skill = active.skill;
+        // Client reuse delays, compressed for a horde game.
+        loadout.skills[skill].cooldown = (def.reuse * 0.6).clamp(0.4, 6.0) * run.cooldown_mult;
+        cast.active = None;
+    }
+}
+
+/// Spawns one skill effect relative to the caster or its target.
+fn spawn_fx(
+    commands: &mut Commands,
+    asset: &Arc<EffectAsset>,
+    spec: &FxSpec,
+    caster: &Transform,
+    caster_entity: Entity,
+    target: Vec3,
+) {
+    if spec.on_target {
+        let at = Transform::from_translation(target + Vec3::Y * 0.9 + spec.offset).with_rotation(caster.rotation);
+        spawn_effect(commands, asset, at, None);
+    } else if spec.attached {
+        let at = Transform::from_translation(caster.translation + Vec3::Y * 1.0 + caster.rotation * spec.offset)
+            .with_rotation(caster.rotation);
+        spawn_effect(commands, asset, at, Some(caster_entity));
+    } else {
+        let at = Transform::from_translation(caster.translation + Vec3::Y * 1.0 + caster.rotation * spec.offset)
+            .with_rotation(caster.rotation);
+        spawn_effect(commands, asset, at, None);
+    }
+}
+
+/// Lazily loaded effect classes for skills (some skills use dozens).
+#[derive(Resource, Default)]
+struct FxLoader {
+    loaded: std::collections::HashMap<String, Option<Arc<EffectAsset>>>,
+}
+
+impl FxLoader {
+    fn get(
+        &mut self,
+        name: &str,
+        cache: &mut EffectCache,
+        lib: &mut L2Library,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> Option<Arc<EffectAsset>> {
+        self.loaded
+            .entry(name.to_string())
+            .or_insert_with(|| cache.load(lib, name, meshes, materials, images))
+            .clone()
+    }
+}
+
+/// Deferred kill so damage code can run inside queries.
+struct Kill {
+    enemy: Entity,
+    at: Vec3,
+}
+
+impl Command for Kill {
+    type Out = ();
+
+    fn apply(self, world: &mut World) {
+        let Ok(mut e) = world.get_entity_mut(self.enemy) else { return };
+        if e.take::<Enemy>().is_none() {
+            return; // already dead this frame
+        }
+        e.insert(Dying(1.6));
+        world.resource_mut::<Run>().kills += 1;
+        let (mesh, mat) = {
+            let p = world.resource::<Palette>();
+            (p.gem_mesh.clone(), p.gem_mat.clone())
+        };
+        world.spawn((
+            RunEntity,
+            Gem(1),
+            Mesh3d(mesh),
+            MeshMaterial3d(mat),
+            Transform::from_xyz(self.at.x, 0.3, self.at.z).with_rotation(Quat::from_rotation_y(0.7)),
+        ));
     }
 }
 
 fn move_bolts(
     mut commands: Commands,
     time: Res<Time>,
-    mut run: ResMut<Run>,
-    palette: Res<Palette>,
-    fx: Res<Fx>,
     mut bolts: Query<(Entity, &mut Projectile, &mut Transform), Without<Enemy>>,
     mut enemies: Query<(Entity, &mut Enemy, &Transform)>,
 ) {
@@ -648,17 +924,17 @@ fn move_bolts(
         let mut gone = bolt.life <= 0.0;
         if !gone {
             for (e, mut enemy, et) in &mut enemies {
-                if enemy.hp <= 0.0 || et.translation.with_y(0.0).distance(t.translation.with_y(0.0)) > ENEMY_RADIUS + 0.2 {
+                if enemy.hp <= 0.0 || et.translation.with_y(0.0).distance(t.translation.with_y(0.0)) > enemy.radius + 0.2 {
                     continue;
                 }
                 enemy.hp -= bolt.damage;
-                if let Some(hit) = &fx.hit {
-                    let mut at = Transform::from_translation(et.translation + Vec3::Y * 0.9);
+                for (spec, asset) in &bolt.explosion {
+                    let mut at = Transform::from_translation(et.translation + Vec3::Y * 0.9 + spec.offset);
                     face(&mut at, -bolt.velocity);
-                    spawn_effect(&mut commands, hit, at, None);
+                    spawn_effect(&mut commands, asset, at, None);
                 }
                 if enemy.hp <= 0.0 {
-                    kill(&mut commands, &mut run, &palette, e, et.translation);
+                    commands.queue(Kill { enemy: e, at: et.translation });
                 }
                 if bolt.pierce == 0 {
                     gone = true;
@@ -673,44 +949,58 @@ fn move_bolts(
     }
 }
 
-fn aura_damage(
-    mut commands: Commands,
+/// Rotates client monsters into the waves: starts with a few kinds and swaps
+/// in a new random one every `WAVE_SECONDS`.
+#[allow(clippy::too_many_arguments)]
+fn grow_roster(
     time: Res<Time>,
     mut run: ResMut<Run>,
-    palette: Res<Palette>,
-    player: Single<&Transform, With<Player>>,
-    mut aura: Single<(&mut Transform, &mut Visibility), (With<Aura>, Without<Player>, Without<Enemy>)>,
-    mut enemies: Query<(Entity, &mut Enemy, &Transform), Without<Player>>,
+    mut roster: ResMut<Roster>,
+    data: Res<GameData>,
+    mut lib: ResMut<L2Library>,
+    mut cache: ResMut<ModelCache>,
+    mut assets: (
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<StandardMaterial>>,
+        ResMut<Assets<Image>>,
+        ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    ),
 ) {
-    let (ref mut at, ref mut vis) = *aura;
-    if run.aura_radius <= 0.0 {
-        **vis = Visibility::Hidden;
+    run.wave_timer -= time.delta_secs();
+    let want_more = roster.enemies.len() < 3;
+    if (run.wave_timer > 0.0 && !want_more) || data.monsters.is_empty() {
         return;
     }
-    **vis = Visibility::Inherited;
-    at.scale = Vec3::splat(run.aura_radius);
-    let center = player.translation.with_y(0.0);
-    let dmg = run.aura_dps * time.delta_secs();
-    for (e, mut enemy, et) in &mut enemies {
-        if enemy.hp > 0.0 && et.translation.with_y(0.0).distance(center) < run.aura_radius + ENEMY_RADIUS {
-            enemy.hp -= dmg;
-            if enemy.hp <= 0.0 {
-                kill(&mut commands, &mut run, &palette, e, et.translation);
-            }
-        }
+    if run.wave_timer <= 0.0 {
+        run.wave_timer = WAVE_SECONDS;
     }
-}
-
-fn kill(commands: &mut Commands, run: &mut Run, palette: &Palette, e: Entity, at: Vec3) {
-    commands.entity(e).remove::<Enemy>().insert(Dying(1.6));
-    run.kills += 1;
-    commands.spawn((
-        RunEntity,
-        Gem(1),
-        Mesh3d(palette.gem_mesh.clone()),
-        MeshMaterial3d(palette.gem_mat.clone()),
-        Transform::from_xyz(at.x, 0.3, at.z).with_rotation(Quat::from_rotation_y(0.7)),
-    ));
+    let (meshes, materials, images, bindposes) = &mut assets;
+    let mut rng = rand::rng();
+    for _ in 0..12 {
+        let kind = data.monsters[rng.random_range(0..data.monsters.len())].clone();
+        if roster.enemies.iter().any(|(_, k)| k.mesh == kind.mesh) {
+            continue;
+        }
+        let Some(model) = cache.load(&mut lib, &kind.package, &kind.spec, None, meshes, materials, images, bindposes)
+        else {
+            continue;
+        };
+        // Needs at least a run cycle to chase the player, and early waves stay
+        // small: bigger beasts join as the run goes on.
+        let max_height = (2.2 + run.time / 60.0 * 0.6).min(4.5);
+        let bad_size = !model.height.is_finite() || model.height < 0.4 || model.height > max_height;
+        if (model.clip("run").is_none() && model.clip("walk").is_none()) || bad_size {
+            continue;
+        }
+        let mut kind = kind;
+        kind.radius = (model.height * 0.22).clamp(0.3, 1.0);
+        info!("wave: {} ({}), {:.1} m", kind.mesh, kind.npc_id, model.height);
+        roster.enemies.push((model, kind));
+        if roster.enemies.len() > ACTIVE_KINDS {
+            roster.enemies.remove(0);
+        }
+        break;
+    }
 }
 
 fn collect_gems(
@@ -755,12 +1045,12 @@ fn enemy_contact(
     let p = player.translation.with_y(0.0);
     let hit: f32 = enemies
         .iter()
-        .filter(|(_, t)| t.translation.with_y(0.0).distance(p) < PLAYER_RADIUS + ENEMY_RADIUS)
+        .filter(|(e, t)| t.translation.with_y(0.0).distance(p) < PLAYER_RADIUS + e.radius)
         .map(|(e, _)| e.damage)
         .sum();
     if hit > 0.0 {
         run.hp -= hit;
-        run.contact_cooldown = 0.4;
+        run.contact_cooldown = 0.5;
         if run.hp <= 0.0 {
             next.set(GameState::GameOver);
         }
@@ -859,10 +1149,13 @@ fn follow_camera(
         cam.look_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y);
         return;
     };
-    let target = player.translation + Vec3::new(0.0, 11.0, 7.5);
+    // L2_ZOOM < 1 brings the camera closer (for inspecting animations).
+    let zoom: f32 = std::env::var("L2_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let offset = Vec3::new(0.0, 11.0, 7.5) * zoom;
+    let target = player.translation + offset;
     cam.translation = cam.translation.lerp(target, k);
     let eye = cam.translation;
-    cam.look_at(eye - Vec3::new(0.0, 11.0, 7.5), Vec3::Y);
+    cam.look_at(eye - offset + Vec3::Y * (1.0 - zoom).max(0.0), Vec3::Y);
 }
 
 fn update_hud(run: Res<Run>, state: Res<State<GameState>>, mut hud: Single<&mut Text, With<Hud>>) {
@@ -926,23 +1219,126 @@ fn spawn_menu_styled(commands: &mut Commands, title: &str, lines: &[String], sid
 #[derive(Component)]
 struct MenuLine(usize);
 
-fn open_level_up(mut commands: Commands, mut choice: ResMut<LevelUpChoice>) {
+/// Skill icons from the client (`icon.skill1177` -> package icon, object skill1177).
+#[derive(Resource, Default)]
+struct IconCache(std::collections::HashMap<String, Option<Handle<Image>>>);
+
+impl IconCache {
+    fn get(&mut self, name: &str, lib: &mut L2Library, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        self.0
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let (p, o) = name.split_once('.')?;
+                lib.texture(p, o, false).map(|i| images.add(i))
+            })
+            .clone()
+    }
+}
+
+fn choice_text(c: &Choice, loadout: &Loadout) -> (String, String) {
+    match c {
+        Choice::NewSkill(d) => (
+            format!("New skill: {}{}", d.name, if d.flying_time > 0.0 { " (ranged)" } else { "" }),
+            d.icon.clone(),
+        ),
+        Choice::SkillUp(i) => {
+            let o = &loadout.skills[*i];
+            (format!("{} Lv {} -> {}: +35% damage", o.def.name, o.level, o.level + 1), o.def.icon.clone())
+        }
+        Choice::Passive(p) => (p.label().to_string(), p.icon().to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_level_up(
+    mut commands: Commands,
+    mut choice: ResMut<LevelUpChoice>,
+    loadout: Res<Loadout>,
+    data: Res<GameData>,
+    select: Res<SelectState>,
+    mut icons: ResMut<IconCache>,
+    mut lib: ResMut<L2Library>,
+    mut images: ResMut<Assets<Image>>,
+) {
     let mut rng = rand::rng();
-    let mut pool = Upgrade::ALL.to_vec();
-    choice.options = (0..3).map(|_| pool.swap_remove(rng.random_range(0..pool.len()))).collect();
+    let mystic = is_mystic(select.index);
+    let mut pool: Vec<Choice> = Vec::new();
+    if loadout.skills.len() < MAX_SKILLS {
+        let fresh: Vec<&Arc<SkillDef>> = data
+            .skills
+            .iter()
+            .filter(|s| s.magic == mystic && !loadout.skills.iter().any(|o| o.def.id == s.id))
+            .collect();
+        for _ in 0..2 {
+            if !fresh.is_empty() {
+                pool.push(Choice::NewSkill(fresh[rng.random_range(0..fresh.len())].clone()));
+            }
+        }
+    }
+    for i in 0..loadout.skills.len() {
+        pool.push(Choice::SkillUp(i));
+    }
+    for p in Passive::ALL {
+        pool.push(Choice::Passive(p));
+    }
+    // Always offer at least one skill-related pick.
+    let mut options = Vec::new();
+    if let Some(i) = pool.iter().position(|c| !matches!(c, Choice::Passive(_))) {
+        let first = rng.random_range(0..=i.min(pool.len() - 1));
+        options.push(pool.remove(if matches!(pool[first], Choice::Passive(_)) { i } else { first }));
+    }
+    while options.len() < 3 && !pool.is_empty() {
+        options.push(pool.swap_remove(rng.random_range(0..pool.len())));
+    }
+    choice.options = options;
     choice.selected = 0;
-    let lines: Vec<String> = choice.options.iter().map(|u| u.label().to_string()).collect();
-    spawn_menu(&mut commands, "Level up! Choose a skill", &lines);
+
+    let entries: Vec<(String, Option<Handle<Image>>)> = choice
+        .options
+        .iter()
+        .map(|c| {
+            let (text, icon) = choice_text(c, &loadout);
+            (text, icons.get(&icon, &mut lib, &mut images))
+        })
+        .collect();
+    commands
+        .spawn((
+            Menu,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(12.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ))
+        .with_children(|p| {
+            p.spawn((Text::new("Level up! Choose"), TextFont { font_size: FontSize::Px(40.0), ..default() }));
+            for (i, (text, icon)) in entries.into_iter().enumerate() {
+                p.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(12.0), width: Val::Px(620.0), ..default() })
+                    .with_children(|row| {
+                        if let Some(img) = icon {
+                            row.spawn((ImageNode::new(img), Node { width: Val::Px(40.0), height: Val::Px(40.0), ..default() }));
+                        }
+                        row.spawn((MenuLine(i), Text::new(text), TextFont { font_size: FontSize::Px(24.0), ..default() }));
+                    });
+            }
+        });
 }
 
 fn level_up_menu(
     input: Res<PlayerInput>,
     mut choice: ResMut<LevelUpChoice>,
     mut run: ResMut<Run>,
+    mut loadout: ResMut<Loadout>,
     mut next: ResMut<NextState<GameState>>,
     mut lines: Query<(&MenuLine, &mut TextColor)>,
 ) {
-    let n = choice.options.len();
+    let n = choice.options.len().max(1);
     if input.nav != 0 {
         choice.selected = (choice.selected as i32 + input.nav).rem_euclid(n as i32) as usize;
     }
@@ -950,8 +1346,57 @@ fn level_up_menu(
         color.0 = if line.0 == choice.selected { Color::srgb(1.0, 0.85, 0.3) } else { Color::WHITE };
     }
     if input.confirm {
-        choice.options[choice.selected].apply(&mut run);
+        match choice.options.get(choice.selected).cloned() {
+            Some(Choice::NewSkill(def)) => loadout.skills.push(Owned { def, level: 1, cooldown: 0.0 }),
+            Some(Choice::SkillUp(i)) => loadout.skills[i].level += 1,
+            Some(Choice::Passive(p)) => p.apply(&mut run),
+            None => {}
+        }
         next.set(GameState::Playing);
+    }
+}
+
+/// Bottom bar: owned skills with their icons, levels and cooldowns.
+#[derive(Component)]
+struct SkillBar;
+
+#[derive(Component)]
+struct SkillSlot;
+
+#[allow(clippy::too_many_arguments)]
+fn update_skill_bar(
+    mut commands: Commands,
+    loadout: Res<Loadout>,
+    bar: Single<Entity, With<SkillBar>>,
+    slots: Query<Entity, With<SkillSlot>>,
+    mut icons: ResMut<IconCache>,
+    mut lib: ResMut<L2Library>,
+    mut images: ResMut<Assets<Image>>,
+    mut shown: Local<Vec<(u32, u32, bool)>>,
+) {
+    let now: Vec<(u32, u32, bool)> = loadout.skills.iter().map(|s| (s.def.id, s.level, s.cooldown > 0.0)).collect();
+    if *shown == now {
+        return;
+    }
+    *shown = now;
+    for e in &slots {
+        commands.entity(e).despawn();
+    }
+    for s in &loadout.skills {
+        let icon = icons.get(&s.def.icon, &mut lib, &mut images);
+        let tint = if s.cooldown > 0.0 { Color::srgb(0.45, 0.45, 0.45) } else { Color::WHITE };
+        commands.entity(*bar).with_children(|b| {
+            b.spawn((SkillSlot, Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, ..default() }))
+                .with_children(|slot| {
+                    if let Some(img) = icon {
+                        slot.spawn((
+                            ImageNode::new(img).with_color(tint),
+                            Node { width: Val::Px(44.0), height: Val::Px(44.0), ..default() },
+                        ));
+                    }
+                    slot.spawn((Text::new(format!("Lv{}", s.level)), TextFont { font_size: FontSize::Px(14.0), ..default() }));
+                });
+        });
     }
 }
 
