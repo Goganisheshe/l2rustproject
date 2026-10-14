@@ -491,7 +491,14 @@ fn material_from_info(info: Option<MaterialInfo>, images: &mut Assets<Image>) ->
             let (cutout, two_sided) = (m.cutout, m.cutout || m.two_sided);
             StandardMaterial {
                 base_color_texture: Some(images.add(to_image(m.texture, true))),
-                alpha_mode: if cutout { AlphaMode::Mask(m.alpha_cutoff) } else { AlphaMode::Opaque },
+                alpha_mode: if m.additive {
+                    AlphaMode::Add
+                } else if cutout {
+                    AlphaMode::Mask(m.alpha_cutoff)
+                } else {
+                    AlphaMode::Opaque
+                },
+                unlit: m.additive,
                 double_sided: two_sided,
                 cull_mode: if two_sided { None } else { Some(bevy::render::render_resource::Face::Back) },
                 perceptual_roughness: 0.9,

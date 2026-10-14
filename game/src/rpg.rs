@@ -23,8 +23,6 @@ use crate::streaming::{ue_to_bevy, TileStreamer};
 
 /// Model kinds loaded per frame (each load decodes a skeletal mesh).
 const MODEL_LOADS_PER_FRAME: usize = 2;
-/// Starter weapon P.Atk added to the class base.
-const STARTER_WEAPON_PATK: f32 = 20.0;
 
 pub struct RpgPlugin;
 
@@ -86,6 +84,18 @@ pub struct HeroStats {
     pub respawn: Vec3,
     /// Active buffs from skills.
     pub buffs: Vec<Buff>,
+    pub equip: Equipment,
+}
+
+/// Sum of equipped item stats.
+#[derive(Clone, Debug, Default)]
+pub struct Equipment {
+    pub patk: f32,
+    pub matk: f32,
+    pub pdef: f32,
+    pub mdef: f32,
+    /// Weapon attack speed (0 = unarmed, use the class base).
+    pub atk_speed: f32,
 }
 
 /// A timed stat modifier from a skill effect (PhysicalAttack, Speed...).
@@ -125,6 +135,7 @@ impl HeroStats {
             dead_timer: 0.0,
             respawn: Vec3::ZERO,
             buffs: Vec::new(),
+            equip: Equipment::default(),
         };
         s.recalc();
         s.hp = s.max_hp;
@@ -143,13 +154,14 @@ impl HeroStats {
         self.max_mp = gain.mp;
         self.hp_regen = gain.hp_regen;
         self.mp_regen = gain.mp_regen;
-        self.patk = (t.patk + STARTER_WEAPON_PATK) * str_bonus.max(0.5) * lvl_mod;
-        self.pdef = t.pdef * lvl_mod;
+        let e = &self.equip;
+        self.patk = (t.patk + e.patk) * str_bonus.max(0.5) * lvl_mod;
+        self.pdef = (t.pdef + e.pdef) * lvl_mod;
         let int_bonus = 1.0 + (t.int - 40.0) * 0.02;
-        self.matk = t.matk * int_bonus.max(0.5) * lvl_mod * lvl_mod;
-        self.mdef = t.mdef * lvl_mod;
+        self.matk = (t.matk + e.matk) * int_bonus.max(0.5) * lvl_mod * lvl_mod;
+        self.mdef = (t.mdef + e.mdef) * lvl_mod;
         self.run_speed = t.run_speed;
-        let mut atk_speed = t.patk_speed;
+        let mut atk_speed = if e.atk_speed > 0.0 { e.atk_speed } else { t.patk_speed };
         for b in &self.buffs {
             let apply = |v: &mut f32| {
                 if b.percent {
@@ -219,6 +231,8 @@ pub struct Npc {
     dead_timer: f32,
     /// Hit by the hero: turns passive monsters hostile.
     pub provoked: bool,
+    /// Drops already rolled.
+    pub looted: bool,
     actor: Option<Entity>,
 }
 
@@ -258,6 +272,7 @@ fn spawn_npc(
             atk_timer: 0.0,
             dead_timer: 0.0,
             provoked: false,
+            looted: false,
             actor: None,
         },
         NeedsModel,

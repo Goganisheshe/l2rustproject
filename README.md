@@ -33,7 +33,10 @@ default `G:/visery/l2-datapack/classic`): NPC stats and spawns, class
 templates, experience, server skills and class skill trees. Combat: Tab /
 click / RB target, F / X auto-attack; skills are learned automatically as you
 level (SP is spent) and sit on the 1–9 hotbar (gamepad: LB + A/B/X/Y = 1–4,
-LT + A/B/X/Y = 5–8). Test helpers: `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
+LT + A/B/X/Y = 5–8). Items: starting kit per class, equipment stats (P.Atk/P.Def/M.Atk/M.Def/
+attack speed), monster drop lists with auto-loot and adena; inventory window
+on I / gamepad Select (Enter / A equips). Test helpers: `L2_INVENTORY=1`,
+`L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
 `L2_DEBUG_NPC=1`, `L2_START="x,y,z"`.
 
 A run starts on the character screen: 16 race/sex/archetype combinations

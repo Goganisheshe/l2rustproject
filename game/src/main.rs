@@ -1,6 +1,7 @@
 //! L2 Survivor: Lineage II assets driven by a Vampire Survivors style loop.
 
 mod input;
+mod items;
 mod character;
 mod collision;
 mod datapack;
@@ -38,7 +39,7 @@ fn main() {
     } else if std::env::var_os("L2_SURVIVOR").is_some() {
         app.add_plugins(survivor::SurvivorPlugin);
     } else {
-        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin));
+        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin));
     }
     app.run();
 }

@@ -113,6 +113,7 @@ impl Library {
     pub fn material_info(&mut self, material: &ObjectHandle) -> Option<MaterialInfo> {
         let mut cur = material.clone();
         let (mut cutout, mut two_sided, mut shader) = (false, false, false);
+        let mut additive = false;
         let mut alpha_ref: Option<u8> = None;
         let mut opacity: Option<ObjectHandle> = None;
         for _ in 0..8 {
@@ -130,7 +131,7 @@ impl Library {
                     }
                 }
                 let alpha_cutoff = alpha_ref.map(|r| (r as f32 / 255.0).max(0.02)).unwrap_or(0.5);
-                return Some(MaterialInfo { texture, cutout, two_sided, alpha_cutoff });
+                return Some(MaterialInfo { texture, cutout, two_sided, alpha_cutoff, additive });
             }
             let field = match class.as_str() {
                 "shader" => "Diffuse",
@@ -155,6 +156,14 @@ impl Library {
                 alpha_ref = alpha_ref.or(props.byte(&pkg, "AlphaRef"));
             }
             two_sided |= flag("TwoSided");
+            // FinalBlend FB_Translucent / FB_Brighten and Shader OB_Translucent /
+            // OB_Brighten draw additively (fire, glows, light shafts).
+            if class == "finalblend" && matches!(props.byte(&pkg, "FrameBufferBlending"), Some(4 | 6)) {
+                additive = true;
+            }
+            if class == "shader" && matches!(props.byte(&pkg, "OutputBlending"), Some(3 | 5)) {
+                additive = true;
+            }
             let next = props.object(&pkg, field).map(ObjectRef::from_raw)?;
             cur = self.resolve(&pkg, next)?;
         }
@@ -184,4 +193,6 @@ pub struct MaterialInfo {
     pub two_sided: bool,
     /// Alpha below this is discarded when `cutout` (from `AlphaRef`).
     pub alpha_cutoff: f32,
+    /// Additive blending (FinalBlend translucent/brighten).
+    pub additive: bool,
 }

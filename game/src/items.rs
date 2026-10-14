@@ -1,0 +1,409 @@
+//! Items from the datapack: templates with stats, starting equipment per
+//! class, monster drop lists, the hero's inventory and equipment, and an
+//! inventory window (I / gamepad Select).
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+
+use bevy::prelude::*;
+use rand::Rng;
+
+use crate::input::PlayerInput;
+use crate::l2assets::L2Library;
+use crate::mmo::{Hero, Phase};
+use crate::rpg::{HeroStats, Log, Npc, NpcState};
+
+const DEFAULT_DATAPACK: &str = "G:/visery/l2-datapack/classic";
+pub const ADENA: u32 = 57;
+
+#[derive(Debug, Clone)]
+pub struct ItemTemplate {
+    pub id: u32,
+    pub name: String,
+    /// Weapon, Armor, EtcItem.
+    pub kind: String,
+    pub icon: String,
+    /// rhand, lrhand, chest, legs, head, gloves, feet, neck, ...
+    pub bodypart: String,
+    pub stats: HashMap<String, f32>,
+}
+
+impl ItemTemplate {
+    pub fn stat(&self, name: &str) -> f32 {
+        self.stats.get(name).copied().unwrap_or(0.0)
+    }
+    pub fn equippable(&self) -> bool {
+        !self.bodypart.is_empty() && self.kind != "EtcItem"
+    }
+    /// Equipment slot; two-handed weapons use the right-hand slot.
+    pub fn slot(&self) -> &str {
+        match self.bodypart.as_str() {
+            "lrhand" => "rhand",
+            "alldress" => "chest",
+            "rear;lear" => "ear",
+            "rfinger;lfinger" => "finger",
+            b => b,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DropEntry {
+    pub item: u32,
+    pub min: u64,
+    pub max: u64,
+    /// Percent.
+    pub chance: f32,
+}
+
+#[derive(Debug, Clone)]
+pub enum DropRule {
+    Single(DropEntry),
+    /// Roll `chance`, then pick one entry weighted by its chance.
+    Group { chance: f32, items: Vec<DropEntry> },
+}
+
+#[derive(Resource, Default)]
+pub struct ItemData {
+    pub items: HashMap<u32, ItemTemplate>,
+    /// classId -> (item, count, equipped).
+    pub initial: HashMap<u32, Vec<(u32, u64, bool)>>,
+    pub drops: HashMap<u32, Vec<DropRule>>,
+}
+
+#[derive(Component, Default)]
+pub struct Inventory {
+    /// item id -> count.
+    pub items: BTreeMap<u32, u64>,
+    /// slot -> item id.
+    pub equipped: BTreeMap<String, u32>,
+}
+
+pub struct ItemsPlugin;
+
+impl Plugin for ItemsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ItemData>()
+            .init_resource::<InventoryUi>()
+            .add_systems(PreStartup, load_items)
+            .add_systems(
+                Update,
+                (give_starting_items, loot, apply_equipment, inventory_window).chain().run_if(in_state(Phase::InWorld)),
+            );
+    }
+}
+
+fn xml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            xml_files(&p, out);
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xml")) {
+            out.push(p);
+        }
+    }
+}
+
+fn attr<T: std::str::FromStr>(n: roxmltree::Node, name: &str) -> Option<T> {
+    n.attribute(name)?.parse().ok()
+}
+
+fn load_items(mut data: ResMut<ItemData>) {
+    let root = std::env::var_os("L2_DATAPACK").map(PathBuf::from).unwrap_or_else(|| DEFAULT_DATAPACK.into());
+    let mut files = Vec::new();
+    xml_files(&root.join("stats/items"), &mut files);
+    for f in files {
+        let Ok(src) = std::fs::read_to_string(&f) else { continue };
+        let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
+        for n in doc.root_element().children().filter(|c| c.has_tag_name("item")) {
+            let Some(id) = attr::<u32>(n, "id") else { continue };
+            let set = |name: &str| {
+                n.children()
+                    .find(|c| c.has_tag_name("set") && c.attribute("name") == Some(name))
+                    .and_then(|c| c.attribute("val"))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let stats = n
+                .children()
+                .find(|c| c.has_tag_name("stats"))
+                .map(|s| {
+                    s.children()
+                        .filter(|c| c.has_tag_name("stat"))
+                        .filter_map(|c| Some((c.attribute("type")?.to_string(), c.text()?.trim().parse().ok()?)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            data.items.insert(
+                id,
+                ItemTemplate {
+                    id,
+                    name: n.attribute("name").unwrap_or("").to_string(),
+                    kind: n.attribute("type").unwrap_or("EtcItem").to_string(),
+                    icon: set("icon"),
+                    bodypart: set("bodypart"),
+                    stats,
+                },
+            );
+        }
+    }
+    if let Ok(src) = std::fs::read_to_string(root.join("stats/players/initialEquipment.xml")) {
+        if let Ok(doc) = roxmltree::Document::parse(&src) {
+            for e in doc.root_element().children().filter(|c| c.has_tag_name("equipment")) {
+                let Some(class) = attr::<u32>(e, "classId") else { continue };
+                let list = e
+                    .children()
+                    .filter(|c| c.has_tag_name("item"))
+                    .filter_map(|c| Some((attr(c, "id")?, attr(c, "count").unwrap_or(1), c.attribute("equipped") == Some("true"))))
+                    .collect();
+                data.initial.insert(class, list);
+            }
+        }
+    }
+    let entry = |c: roxmltree::Node| -> Option<DropEntry> {
+        Some(DropEntry {
+            item: attr(c, "id")?,
+            min: attr(c, "min").unwrap_or(1),
+            max: attr(c, "max").unwrap_or(1),
+            chance: attr(c, "chance").unwrap_or(100.0),
+        })
+    };
+    let mut files = Vec::new();
+    xml_files(&root.join("stats/npcs"), &mut files);
+    for f in files {
+        let Ok(src) = std::fs::read_to_string(&f) else { continue };
+        let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
+        for n in doc.root_element().children().filter(|c| c.has_tag_name("npc")) {
+            let Some(id) = attr::<u32>(n, "id") else { continue };
+            let Some(drop) = n.descendants().find(|c| c.has_tag_name("drop")) else { continue };
+            let mut rules = Vec::new();
+            for c in drop.children() {
+                if c.has_tag_name("item") {
+                    if let Some(e) = entry(c) {
+                        rules.push(DropRule::Single(e));
+                    }
+                } else if c.has_tag_name("group") {
+                    let items = c.children().filter(|i| i.has_tag_name("item")).filter_map(entry).collect();
+                    rules.push(DropRule::Group { chance: attr(c, "chance").unwrap_or(100.0), items });
+                }
+            }
+            data.drops.insert(id, rules);
+        }
+    }
+    info!("items: {} templates, {} starting kits, {} drop lists", data.items.len(), data.initial.len(), data.drops.len());
+}
+
+/// Rolls a monster's drop list.
+pub fn roll_drops(rules: &[DropRule], rng: &mut impl Rng) -> Vec<(u32, u64)> {
+    let mut out = Vec::new();
+    let count = |e: &DropEntry, rng: &mut dyn FnMut(u64, u64) -> u64| if e.max > e.min { rng(e.min, e.max) } else { e.min };
+    let mut range = |a: u64, b: u64| -> u64 { a + (rand::random::<u64>() % (b - a + 1)) };
+    for r in rules {
+        match r {
+            DropRule::Single(e) => {
+                if rng.random_range(0.0..100.0) < e.chance {
+                    out.push((e.item, count(e, &mut range)));
+                }
+            }
+            DropRule::Group { chance, items } => {
+                if rng.random_range(0.0..100.0) >= *chance || items.is_empty() {
+                    continue;
+                }
+                let total: f32 = items.iter().map(|i| i.chance).sum();
+                let mut pick = rng.random_range(0.0..total.max(0.001));
+                for e in items {
+                    pick -= e.chance;
+                    if pick <= 0.0 {
+                        out.push((e.item, count(e, &mut range)));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn give_starting_items(
+    mut commands: Commands,
+    data: Res<ItemData>,
+    hero: Single<(Entity, &HeroStats), (With<Hero>, Without<Inventory>)>,
+) {
+    let (e, stats) = hero.into_inner();
+    let mut inv = Inventory::default();
+    for &(item, count, equipped) in data.initial.get(&stats.template.class_id).into_iter().flatten() {
+        *inv.items.entry(item).or_default() += count;
+        if let (true, Some(t)) = (equipped, data.items.get(&item)) {
+            inv.equipped.insert(t.slot().to_string(), item);
+        }
+    }
+    commands.entity(e).insert(inv);
+}
+
+/// Auto-loot: dead monsters drop straight into the inventory.
+fn loot(
+    data: Res<ItemData>,
+    mut log: ResMut<Log>,
+    mut inv: Single<&mut Inventory, With<Hero>>,
+    mut npcs: Query<&mut Npc>,
+) {
+    let mut rng = rand::rng();
+    for mut npc in &mut npcs {
+        if npc.state != NpcState::Dead || npc.looted {
+            continue;
+        }
+        npc.looted = true;
+        let Some(rules) = data.drops.get(&npc.template.id) else { continue };
+        for (item, count) in roll_drops(rules, &mut rng) {
+            *inv.items.entry(item).or_default() += count;
+            let name = data.items.get(&item).map_or(format!("item {item}"), |t| t.name.clone());
+            if item == ADENA {
+                log.push(format!("You picked up {count} Adena"));
+            } else {
+                log.push(format!("You picked up {name}{}", if count > 1 { format!(" x{count}") } else { String::new() }));
+            }
+        }
+    }
+}
+
+/// Feeds equipped item stats into the hero's stats when equipment changes.
+fn apply_equipment(data: Res<ItemData>, hero: Single<(&Inventory, &mut HeroStats), (With<Hero>, Changed<Inventory>)>) {
+    let (inv, mut stats) = hero.into_inner();
+    let (mut patk, mut matk, mut pdef, mut mdef, mut spd) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for item in inv.equipped.values() {
+        let Some(t) = data.items.get(item) else { continue };
+        patk += t.stat("pAtk");
+        matk += t.stat("mAtk");
+        pdef += t.stat("pDef");
+        mdef += t.stat("mDef");
+        if t.kind == "Weapon" {
+            spd = t.stat("pAtkSpd");
+        }
+    }
+    stats.equip = crate::rpg::Equipment { patk, matk, pdef, mdef, atk_speed: spd };
+    stats.recalc();
+}
+
+// ---------------------------------------------------------------------------
+// Inventory window
+// ---------------------------------------------------------------------------
+
+#[derive(Resource, Default)]
+struct InventoryUi {
+    open: bool,
+    selected: usize,
+    shown: Option<(usize, usize, u64)>,
+}
+
+#[derive(Component)]
+struct InventoryRoot;
+
+#[allow(clippy::too_many_arguments)]
+fn inventory_window(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
+    input: Res<PlayerInput>,
+    data: Res<ItemData>,
+    mut ui: ResMut<InventoryUi>,
+    mut log: ResMut<Log>,
+    mut lib: ResMut<L2Library>,
+    mut images: ResMut<Assets<Image>>,
+    mut icons: Local<HashMap<String, Option<Handle<Image>>>>,
+    mut inv: Single<&mut Inventory, With<Hero>>,
+    roots: Query<Entity, With<InventoryRoot>>,
+    mut opened_by_env: Local<bool>,
+) {
+    // L2_INVENTORY=1 opens the window at start (screenshots).
+    if !*opened_by_env && std::env::var_os("L2_INVENTORY").is_some() {
+        *opened_by_env = true;
+        ui.open = true;
+    }
+    let toggle = keys.just_pressed(KeyCode::KeyI) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::Select));
+    if toggle {
+        ui.open = !ui.open;
+        ui.shown = None;
+    }
+    if !ui.open {
+        for e in &roots {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
+    let list: Vec<(u32, u64)> = inv.items.iter().map(|(k, v)| (*k, *v)).collect();
+    if list.is_empty() {
+        return;
+    }
+    if input.nav != 0 {
+        ui.selected = (ui.selected as i32 + input.nav).rem_euclid(list.len() as i32) as usize;
+    }
+    ui.selected = ui.selected.min(list.len() - 1);
+    // Equip / unequip with Enter or gamepad A (not while toggling).
+    if input.confirm && !toggle {
+        let (id, _) = list[ui.selected];
+        if let Some(t) = data.items.get(&id).filter(|t| t.equippable()) {
+            let slot = t.slot().to_string();
+            if inv.equipped.get(&slot) == Some(&id) {
+                inv.equipped.remove(&slot);
+                log.push(format!("Unequipped {}", t.name));
+            } else {
+                inv.equipped.insert(slot, id);
+                log.push(format!("Equipped {}", t.name));
+            }
+        }
+        ui.shown = None;
+    }
+    let state = (ui.selected, list.len(), list.iter().map(|x| x.1).sum::<u64>() + inv.equipped.len() as u64);
+    if ui.shown == Some(state) {
+        return;
+    }
+    ui.shown = Some(state);
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    let equipped: Vec<u32> = inv.equipped.values().copied().collect();
+    commands
+        .spawn((
+            InventoryRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(16.0),
+                top: Val::Px(80.0),
+                width: Val::Px(340.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(8.0)),
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.85)),
+        ))
+        .with_children(|p| {
+            let adena = inv.items.get(&ADENA).copied().unwrap_or(0);
+            p.spawn((Text::new(format!("Inventory   Adena: {adena}")), TextFont { font_size: FontSize::Px(18.0), ..default() }));
+            for (i, (id, count)) in list.iter().enumerate() {
+                let t = data.items.get(id);
+                let name = t.map_or(format!("item {id}"), |t| t.name.clone());
+                let icon_name = t.map(|t| t.icon.clone()).unwrap_or_default();
+                let icon = icons
+                    .entry(icon_name.clone())
+                    .or_insert_with(|| {
+                        let (pk, o) = icon_name.split_once('.')?;
+                        lib.texture(pk, o, false).map(|img| images.add(img))
+                    })
+                    .clone();
+                let mark = if equipped.contains(id) { " [E]" } else { "" };
+                let color = if i == ui.selected { Color::srgb(1.0, 0.85, 0.3) } else { Color::WHITE };
+                p.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
+                    if let Some(img) = icon {
+                        row.spawn((ImageNode::new(img), Node { width: Val::Px(24.0), height: Val::Px(24.0), ..default() }));
+                    }
+                    row.spawn((
+                        Text::new(format!("{name}{}{mark}", if *count > 1 { format!(" x{count}") } else { String::new() })),
+                        TextFont { font_size: FontSize::Px(14.0), ..default() },
+                        TextColor(color),
+                    ));
+                });
+            }
+        });
+}
