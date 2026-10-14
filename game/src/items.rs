@@ -11,7 +11,7 @@ use rand::Rng;
 use crate::input::PlayerInput;
 use crate::l2assets::L2Library;
 use crate::mmo::{Hero, Phase};
-use crate::rpg::{HeroStats, Log, Npc, NpcState};
+use crate::rpg::{HeroStats, Log};
 
 const DEFAULT_DATAPACK: &str = "G:/visery/l2-datapack/classic";
 pub const ADENA: u32 = 57;
@@ -95,7 +95,7 @@ impl Plugin for ItemsPlugin {
             .add_systems(PreStartup, load_items)
             .add_systems(
                 Update,
-                (give_starting_items, loot, apply_equipment, hero_appearance, inventory_window, use_items).chain().run_if(in_state(Phase::InWorld)),
+                (give_starting_items, apply_equipment, hero_appearance, inventory_window, use_items).chain().run_if(in_state(Phase::InWorld)),
             );
     }
 }
@@ -260,32 +260,6 @@ pub fn give_starting_items(
         }
     }
     commands.entity(e).insert(inv);
-}
-
-/// Auto-loot: dead monsters drop straight into the inventory.
-fn loot(
-    data: Res<ItemData>,
-    mut log: ResMut<Log>,
-    mut inv: Single<&mut Inventory, With<Hero>>,
-    mut npcs: Query<&mut Npc>,
-) {
-    let mut rng = rand::rng();
-    for mut npc in &mut npcs {
-        if npc.state != NpcState::Dead || npc.looted {
-            continue;
-        }
-        npc.looted = true;
-        let Some(rules) = data.drops.get(&npc.template.id) else { continue };
-        for (item, count) in roll_drops(rules, &mut rng) {
-            *inv.items.entry(item).or_default() += count;
-            let name = data.items.get(&item).map_or(format!("item {item}"), |t| t.name.clone());
-            if item == ADENA {
-                log.push(format!("You picked up {count} Adena"));
-            } else {
-                log.push(format!("You picked up {name}{}", if count > 1 { format!(" x{count}") } else { String::new() }));
-            }
-        }
-    }
 }
 
 /// Feeds equipped item stats into the hero's stats when equipment changes.

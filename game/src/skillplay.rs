@@ -16,7 +16,7 @@ use crate::effects::{spawn_effect, EffectCache};
 use crate::gamedata::{GameData, SkillDef};
 use crate::l2assets::{L2Library, UU_TO_M};
 use crate::mmo::{Hero, Phase};
-use crate::rpg::{award_kill, template_for_stats, Buff, HeroStats, Log, Npc, NpcState, Target};
+use crate::rpg::{award_kill, Buff, HeroStats, Log, Npc, NpcState, Target};
 use crate::skinned::Animated;
 
 pub const HOTBAR: usize = 9;

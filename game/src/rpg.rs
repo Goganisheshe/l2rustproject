@@ -452,7 +452,7 @@ impl Log {
 /// Tab / gamepad RB: next monster in front of the camera; left click picks
 /// the NPC under the cursor; F / gamepad X attacks.
 #[allow(clippy::too_many_arguments)]
-fn pick_target(
+pub fn pick_target(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,

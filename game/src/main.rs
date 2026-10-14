@@ -13,6 +13,7 @@ mod quests;
 mod effects;
 mod gamedata;
 mod l2assets;
+mod loot;
 mod mmo;
 mod npcskills;
 mod rpg;
@@ -44,7 +45,7 @@ fn main() {
     } else if let Ok(spec) = std::env::var("L2_MODEL") {
         app.add_plugins(viewer::ViewerPlugin { spec });
     } else {
-        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin, save::SavePlugin, npcskills::NpcSkillsPlugin, skillwindow::SkillWindowPlugin));
+        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin, save::SavePlugin, npcskills::NpcSkillsPlugin, skillwindow::SkillWindowPlugin, loot::LootPlugin));
     }
     app.run();
 }

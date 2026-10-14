@@ -71,6 +71,8 @@ pub struct GameData {
     pub weapons: HashMap<u32, dat::WeaponGrp>,
     /// Armor models per race by item id (armorgrp).
     pub armors: HashMap<u32, dat::ArmorGrp>,
+    /// Ground models of every item (weapon / armor / etc grp).
+    pub drops: HashMap<u32, dat::ItemDrop>,
 }
 
 pub struct GameDataPlugin;
@@ -103,6 +105,7 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
     let npcs = dat::parse_npcgrp(&dat::read_dat(sys.join("npcgrp.dat"))?, &names)?;
     let weapons = dat::parse_weapongrp(&dat::read_dat(sys.join("weapongrp.dat"))?, &names)?;
     let armors = dat::parse_armorgrp(&dat::read_dat(sys.join("armorgrp.dat"))?, &names)?;
+    let etc = dat::parse_etcitemgrp(&dat::read_dat(sys.join("etcitemgrp.dat"))?, &names)?;
 
     let effects = lib.lib.as_mut().and_then(|l| l.package("lineageskilleffect"));
     let visuals = effects.map(|p| skill_visuals(&p)).unwrap_or_default();
@@ -146,9 +149,12 @@ fn load(root: &std::path::Path, lib: &mut L2Library) -> Result<GameData, ue2::Er
         npc_models.insert(n.id, (pkg.to_string(), spec));
     }
 
+    let mut drops: HashMap<u32, dat::ItemDrop> = etc.into_iter().collect();
+    drops.extend(weapons.iter().map(|w| (w.id, w.drop.clone())));
+    drops.extend(armors.iter().map(|a| (a.id, a.drop.clone())));
     let weapons = weapons.into_iter().map(|w| (w.id, w)).collect();
     let armors = armors.into_iter().map(|a| (a.id, a)).collect();
-    Ok(GameData { npc_models, visuals: all_visuals, weapons, armors })
+    Ok(GameData { drops, npc_models, visuals: all_visuals, weapons, armors })
 }
 
 /// `CastMidAnimName` -> `CastMid`.

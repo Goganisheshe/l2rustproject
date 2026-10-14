@@ -405,6 +405,11 @@ pub fn dat_summary(client: &str) -> Result<()> {
     println!("npcgrp: {} entries", npcs.len());
     let weapons = parse_weapongrp(&read_dat(sys.join("weapongrp.dat"))?, &names)?;
     println!("weapongrp: {} entries", weapons.len());
+    let etc = parse_etcitemgrp(&read_dat(sys.join("etcitemgrp.dat"))?, &names)?;
+    println!("etcitemgrp: {} entries", etc.len());
+    for (id, d) in etc.iter().filter(|e| matches!(e.0, 57 | 1060 | 736 | 1835)) {
+        println!("  etc {id}: {d:?}");
+    }
     let armors = parse_armorgrp(&read_dat(sys.join("armorgrp.dat"))?, &names)?;
     println!("armorgrp: {} entries", armors.len());
     let mut parts: std::collections::BTreeMap<u8, (usize, String)> = Default::default();

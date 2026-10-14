@@ -341,6 +341,7 @@ pub struct WeaponGrp {
     pub body_part: u8,
     pub handness: u8,
     pub weapon_type: u8,
+    pub drop: ItemDrop,
 }
 
 /// Parses `weapongrp.dat` (L2ClientDat "Helios" layout, used by Salvation clients).
@@ -349,15 +350,7 @@ pub fn parse_weapongrp(data: &[u8], names: &GameDataNames) -> Result<Vec<WeaponG
     let n = r.u32()? as usize;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        r.u8()?; // tag
-        let id = r.u32()?;
-        r.skip(4)?; // drop type, anim, radius, height
-        let k = r.u8()? as usize;
-        for _ in 0..k {
-            r.u32()?; // drop mesh
-            let t = r.u8()? as usize;
-            r.skip(t * 4)?;
-        }
+        let (id, drop) = item_head(&mut r, names)?;
         r.skip(20)?; // icons
         r.skip(4)?; // durability, weight
         r.skip(2)?; // material, crystallizable
@@ -396,7 +389,7 @@ pub fn parse_weapongrp(data: &[u8], names: &GameDataNames) -> Result<Vec<WeaponG
         let v = r.u8()? as usize;
         r.skip(v * 4)?;
         r.skip(2)?; // ensoul slots
-        out.push(WeaponGrp { id, meshes, textures, body_part, handness, weapon_type });
+        out.push(WeaponGrp { id, meshes, textures, body_part, handness, weapon_type, drop });
     }
     Ok(out)
 }
@@ -417,6 +410,7 @@ pub struct ArmorGrp {
     pub models: Vec<ArmorModel>,
     pub armor_type: u8,
     pub hide_mask: u16,
+    pub drop: ItemDrop,
 }
 
 pub const ARMOR_SLOTS: [&str; 19] = [
@@ -431,15 +425,7 @@ pub fn parse_armorgrp(data: &[u8], names: &GameDataNames) -> Result<Vec<ArmorGrp
     let n = r.u32()? as usize;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        r.u8()?; // tag
-        let id = r.u32()?;
-        r.skip(4)?;
-        let k = r.u8()? as usize;
-        for _ in 0..k {
-            r.u32()?;
-            let t = r.u8()? as usize;
-            r.skip(t * 4)?;
-        }
+        let (id, drop) = item_head(&mut r, names)?;
         r.skip(20 + 4 + 2)?;
         let q = r.u8()? as usize;
         r.skip(q * 2)?;
@@ -475,7 +461,61 @@ pub fn parse_armorgrp(data: &[u8], names: &GameDataNames) -> Result<Vec<ArmorGrp
         r.skip(2)?; // mp bonus
         let hide_mask = r.u16()?;
         r.skip(3)?;
-        out.push(ArmorGrp { id, body_part, models, armor_type, hide_mask });
+        out.push(ArmorGrp { id, body_part, models, armor_type, hide_mask, drop });
+    }
+    Ok(out)
+}
+
+/// How an item looks lying on the ground: static mesh and its textures.
+#[derive(Debug, Clone, Default)]
+pub struct ItemDrop {
+    pub mesh: String,
+    pub textures: Vec<String>,
+}
+
+/// Common start of weapongrp / armorgrp / etcitemgrp records: tag, item id
+/// and the drop models (the first one is used).
+fn item_head(r: &mut Reader, names: &GameDataNames) -> Result<(u32, ItemDrop), Error> {
+    r.u8()?; // tag
+    let id = r.u32()?;
+    r.skip(4)?; // drop type, anim, radius, height
+    let k = r.u8()? as usize;
+    let mut drop = ItemDrop::default();
+    for i in 0..k {
+        let mesh = names.get(r.u32()?).to_string();
+        let t = r.u8()? as usize;
+        let mut textures = Vec::with_capacity(t);
+        for _ in 0..t {
+            textures.push(names.get(r.u32()?).to_string());
+        }
+        if i == 0 {
+            drop = ItemDrop { mesh, textures };
+        }
+    }
+    Ok((id, drop))
+}
+
+/// Parses `etcitemgrp.dat` (L2ClientDat "Helios" layout): only the drop models.
+pub fn parse_etcitemgrp(data: &[u8], names: &GameDataNames) -> Result<Vec<(u32, ItemDrop)>, Error> {
+    let mut r = Reader::new(data);
+    let n = r.u32()? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (id, drop) = item_head(&mut r, names)?;
+        r.skip(20 + 4 + 2)?; // icons, durability, weight, material, crystallizable
+        let q = r.u8()? as usize;
+        r.skip(q * 2)?;
+        r.skip(4 + 8)?; // color, attribution, params, icon panel, drop sound type
+        r.u8()?; // inventory type
+        let m = r.u8()? as usize;
+        r.skip(m * 4)?;
+        let t = r.u8()? as usize;
+        r.skip(t * 4)?;
+        r.skip(8)?; // drop / equip sound
+        r.u8()?; // consume type
+        r.u32()?; // etcitem type
+        r.u8()?; // grade
+        out.push((id, drop));
     }
     Ok(out)
 }
