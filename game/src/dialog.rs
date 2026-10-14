@@ -298,6 +298,8 @@ fn run_bypass(
     mut screen: ResMut<ScreenMsg>,
     mut streamer: ResMut<TileStreamer>,
     mut class_ui: ResMut<crate::classchange::ClassChangeUi>,
+    mut spawn_req: ResMut<crate::rpg::SpawnRequests>,
+    mut commands: Commands,
     hero: Single<(&Hero, &mut Transform, &mut HeroStats, &mut Inventory)>,
 ) {
     let Some(cmd) = dialog.pending.take() else { return };
@@ -314,9 +316,18 @@ fn run_bypass(
         teleport: None,
         screen: None,
         class_change: false,
+        spawns: Vec::new(),
+        despawn_npc: false,
     };
     let page = execute(&cmd, npc, &pages, &quests, &mut qlog, &mut p);
     let (teleport, msg, class_change) = (p.teleport, p.screen.take(), p.class_change);
+    spawn_req.0.append(&mut p.spawns);
+    if p.despawn_npc {
+        if let Some(e) = dialog.npc.take() {
+            commands.entity(e).despawn();
+        }
+        dialog.dirty = true;
+    }
     if class_change {
         class_ui.open = true;
     }
@@ -482,6 +493,8 @@ fn quest_kills(
         teleport: None,
         screen: None,
         class_change: false,
+        spawns: Vec::new(),
+        despawn_npc: false,
     };
     for mut npc in &mut npcs {
         if npc.state != NpcState::Dead || npc.quest_seen {

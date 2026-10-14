@@ -95,6 +95,10 @@ pub struct Player<'a> {
     pub screen: Option<String>,
     /// The script opened the class change window.
     pub class_change: bool,
+    /// NPCs the script spawns: (id, position in Unreal units).
+    pub spawns: Vec<(u32, [f32; 3])>,
+    /// Remove the NPC being talked to.
+    pub despawn_npc: bool,
 }
 
 impl Player<'_> {

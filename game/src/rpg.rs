@@ -29,12 +29,14 @@ pub struct RpgPlugin;
 impl Plugin for RpgPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcSpawner>()
+            .init_resource::<SpawnRequests>()
             .init_resource::<Target>()
             .init_resource::<Log>()
             .add_systems(
                 Update,
                 (
                     spawn_npcs,
+                    spawn_requested,
                     attach_npc_models,
                     pick_target,
                     hero_attack,
@@ -235,8 +237,32 @@ pub struct Npc {
     pub looted: bool,
     /// Death already reported to quests.
     pub quest_seen: bool,
-    actor: Option<Entity>,
+    pub actor: Option<Entity>,
+    /// The boss this minion escorts.
+    pub leader: Option<Entity>,
+    /// Seconds until the next skill.
+    pub skill_timer: f32,
 }
+
+/// Bosses are balanced for parties; solo play scales their HP and attack
+/// (`L2_BOSS_HP` / `L2_BOSS_ATK`, default 5% and 60%).
+fn solo_scale(mut t: NpcTemplate, minion: bool) -> NpcTemplate {
+    if t.is_boss() || minion {
+        let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        t.hp *= env("L2_BOSS_HP", 0.05);
+        let atk = env("L2_BOSS_ATK", 0.6);
+        t.patk *= atk;
+        t.matk *= atk;
+    }
+    t
+}
+
+/// NPCs spawned by scripts (Baium waking up): id and position in Unreal units.
+#[derive(Resource, Default)]
+pub struct SpawnRequests(pub Vec<(u32, [f32; 3])>);
+
+/// Spawn index of NPCs that never respawn on their own (minions, script spawns).
+const NO_RESPAWN: usize = usize::MAX;
 
 #[derive(Component)]
 struct NeedsModel;
@@ -259,29 +285,79 @@ fn spawn_npc(
     idx: usize,
 ) {
     let s = &dp.spawns[idx];
-    let Some(t) = dp.npcs.get(&s.npc) else { return };
-    let template = spawner.templates.entry(s.npc).or_insert_with(|| Arc::new(t.clone())).clone();
-    let mut pos = ue_to_bevy(s.pos);
+    spawn_at(commands, spawner, dp, streamer, world, s.npc, s.pos, s.heading, idx, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_at(
+    commands: &mut Commands,
+    spawner: &mut NpcSpawner,
+    dp: &Datapack,
+    streamer: &TileStreamer,
+    world: &CollisionWorld,
+    npc: u32,
+    ue: [f32; 3],
+    heading: i32,
+    idx: usize,
+    leader: Option<Entity>,
+) -> Option<Entity> {
+    let t = dp.npcs.get(&npc)?;
+    // Raid escorts are party content like their boss; cached apart from
+    // ordinary spawns of the same NPC.
+    let key = if leader.is_some() { npc | 0x8000_0000 } else { npc };
+    let template = spawner.templates.entry(key).or_insert_with(|| Arc::new(solo_scale(t.clone(), leader.is_some()))).clone();
+    let mut pos = ue_to_bevy(ue);
     pos.y = crate::mmo::settle(pos, streamer, world);
-    let yaw = -(s.heading as f32) * std::f32::consts::TAU / 65536.0;
-    commands.spawn((
-        Npc {
-            hp: template.hp,
-            template,
-            spawn: idx,
-            home: pos,
-            state: NpcState::Idle,
-            atk_timer: 0.0,
-            dead_timer: 0.0,
-            provoked: false,
-            looted: false,
-            quest_seen: false,
-            actor: None,
-        },
-        NeedsModel,
-        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
-        Visibility::default(),
-    ));
+    let yaw = -(heading as f32) * std::f32::consts::TAU / 65536.0;
+    let minions = template.minions.clone();
+    let e = commands
+        .spawn((
+            Npc {
+                hp: template.hp,
+                template,
+                spawn: idx,
+                home: pos,
+                state: NpcState::Idle,
+                atk_timer: 0.0,
+                dead_timer: 0.0,
+                provoked: false,
+                looted: false,
+                quest_seen: false,
+                actor: None,
+                leader,
+                skill_timer: 3.0,
+            },
+            NeedsModel,
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+            Visibility::default(),
+        ))
+        .id();
+    // The escort stands in a ring around its boss.
+    let total: u32 = minions.iter().map(|m| m.1).sum();
+    let mut k = 0;
+    for (id, count) in minions {
+        for _ in 0..count {
+            let a = k as f32 / total.max(1) as f32 * std::f32::consts::TAU;
+            k += 1;
+            let p = [ue[0] + 120.0 * a.cos(), ue[1] + 120.0 * a.sin(), ue[2]];
+            spawn_at(commands, spawner, dp, streamer, world, id, p, heading, NO_RESPAWN, Some(e));
+        }
+    }
+    Some(e)
+}
+
+/// Script spawns (`SpawnRequests`).
+fn spawn_requested(
+    mut commands: Commands,
+    mut req: ResMut<SpawnRequests>,
+    mut spawner: ResMut<NpcSpawner>,
+    dp: Res<Datapack>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
+) {
+    for (npc, pos) in std::mem::take(&mut req.0) {
+        spawn_at(&mut commands, &mut spawner, &dp, &streamer, &world, npc, pos, 0, NO_RESPAWN, None);
+    }
 }
 
 fn spawn_npcs(
@@ -552,15 +628,17 @@ fn npc_ai(
     time: Res<Time>,
     mut log: ResMut<Log>,
     hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
-    mut npcs: Query<(&mut Npc, &mut Transform), Without<Hero>>,
+    mut npcs: Query<(Entity, &mut Npc, &mut Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
 ) {
     let dt = time.delta_secs();
     let (hero_tr, mut stats) = hero.into_inner();
+    // Minions join the fight when their boss does.
+    let fighting: HashSet<Entity> = npcs.iter().filter(|(_, n, _)| n.state == NpcState::Chase).map(|(e, _, _)| e).collect();
     let hero_pos = hero_tr.translation;
     let hero_alive = stats.hp > 0.0;
     let mut rng = rand::rng();
-    for (mut npc, mut tr) in &mut npcs {
+    for (_, mut npc, mut tr) in &mut npcs {
         let anim = npc.actor.and_then(|a| anims.get_mut(a).ok());
         if npc.state == NpcState::Dead {
             if let Some(mut a) = anim {
@@ -576,7 +654,8 @@ fn npc_ai(
         let from_home = tr.translation.distance(npc.home);
         match npc.state {
             NpcState::Idle => {
-                if hero_alive && (npc.provoked || (aggro > 0.0 && dist < aggro)) {
+                let assist = npc.leader.is_some_and(|l| fighting.contains(&l));
+                if hero_alive && (npc.provoked || assist || (aggro > 0.0 && dist < aggro)) {
                     npc.state = NpcState::Chase;
                 }
             }
@@ -659,8 +738,10 @@ fn npc_respawn(
         }
         npc.dead_timer += dt;
         if npc.dead_timer > 6.0 {
-            let respawn = dp.spawns.get(npc.spawn).map_or(60.0, |s| s.respawn).clamp(10.0, 600.0);
-            spawner.respawns.push((npc.spawn, respawn));
+            if npc.spawn != NO_RESPAWN {
+                let respawn = dp.spawns.get(npc.spawn).map_or(60.0, |s| s.respawn).clamp(10.0, 600.0);
+                spawner.respawns.push((npc.spawn, respawn));
+            }
             if target.0 == Some(e) {
                 target.0 = None;
             }

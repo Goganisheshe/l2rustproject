@@ -35,6 +35,16 @@ pub struct NpcTemplate {
     pub aggro_range: f32,
     pub radius: f32,
     pub height: f32,
+    /// Skills from `skillList`: (id, level).
+    pub skills: Vec<(u32, u32)>,
+    /// Escort spawned with the NPC: (npc id, count).
+    pub minions: Vec<(u32, u32)>,
+}
+
+impl NpcTemplate {
+    pub fn is_boss(&self) -> bool {
+        matches!(self.kind.as_str(), "RaidBoss" | "GrandBoss")
+    }
 }
 
 impl NpcTemplate {
@@ -139,6 +149,16 @@ pub fn datapack_root() -> PathBuf {
     std::env::var_os("L2_DATAPACK").map(PathBuf::from).unwrap_or_else(|| DEFAULT_DATAPACK.into())
 }
 
+/// Grand boss lairs from the boss scripts (`scripts/ai/bosses`).
+const GRAND_BOSSES: [(u32, [f32; 3]); 6] = [
+    (29001, [-21610.0, 181594.0, -5734.0]), // Queen Ant
+    (29006, [17726.0, 108915.0, -6480.0]),  // Core
+    (29014, [43728.0, 17220.0, -4342.0]),   // Orfen
+    (29022, [52207.0, 217230.0, -3341.0]),  // Zaken
+    (29068, [181323.0, 114850.0, -7623.0]), // Antharas
+    (29025, [116033.0, 17447.0, 10107.0]),  // Baium's stone statue
+];
+
 pub struct DatapackPlugin;
 
 impl Plugin for DatapackPlugin {
@@ -230,6 +250,23 @@ pub fn load(root: &Path) -> Datapack {
                     aggro_range: g(child(n, "ai"), "aggroRange", 0.0),
                     radius: g(collision.and_then(|c| child(c, "radius")), "normal", 10.0),
                     height: g(collision.and_then(|c| child(c, "height")), "normal", 20.0),
+                    skills: child(n, "skillList")
+                        .map(|l| {
+                            l.children()
+                                .filter(|c| c.has_tag_name("skill"))
+                                .filter_map(|c| Some((attr(c, "id")?, attr(c, "level").unwrap_or(1))))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    minions: child(n, "parameters")
+                        .map(|p| {
+                            p.descendants()
+                                .filter(|c| c.has_tag_name("minions"))
+                                .flat_map(|m| m.children().filter(|c| c.has_tag_name("npc")))
+                                .filter_map(|c| Some((attr(c, "id")?, attr(c, "count").unwrap_or(1))))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 },
             );
         }
@@ -283,6 +320,11 @@ pub fn load(root: &Path) -> Datapack {
                 }
             }
         }
+    }
+    // Grand bosses are spawned by their AI scripts on the server; here they
+    // stand in their lairs (Baium sleeps as a statue until woken).
+    for (npc, pos) in GRAND_BOSSES {
+        dp.spawns.push(SpawnPoint { npc, pos, heading: 0, respawn: 3600.0 });
     }
     for (i, s) in dp.spawns.iter().enumerate() {
         let tile = crate::streaming::tile_of(s.pos[0], s.pos[1]);
