@@ -52,7 +52,10 @@ teleports and the quest pages. What is playable:
   casting speed (WIT); armor replaces the bare slot's base defence;
   accuracy vs evasion decides misses; weapon random damage, x2 criticals.
   Monsters get the same functions from their datapack stats. Alt+T shows the
-  status window (`L2_STATUS=1`). Equipped armor and weapons
+  status window (`L2_STATUS=1`).
+- Map: M (gamepad left stick press) opens the world map from the client's
+  `Minimap.worldmapN` art with the hero's position; a radar of the same map
+  sits in the top right corner (`L2_MAP=1` opens the map). Equipped armor and weapons
   change the hero's model (client `armorgrp` / `weapongrp`), weapons switch
   the animation stance. Scrolls of escape / teleport and potions work.
 - NPCs: F / X or a second click on a friendly NPC walks up and opens its

@@ -27,6 +27,7 @@ mod skinned;
 mod streaming;
 mod viewer;
 mod world;
+mod worldmap;
 
 use bevy::prelude::*;
 
@@ -47,7 +48,7 @@ fn main() {
     } else if let Ok(spec) = std::env::var("L2_MODEL") {
         app.add_plugins(viewer::ViewerPlugin { spec });
     } else {
-        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin, save::SavePlugin, npcskills::NpcSkillsPlugin, skillwindow::SkillWindowPlugin, loot::LootPlugin, statswindow::StatusWindowPlugin));
+        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin, save::SavePlugin, npcskills::NpcSkillsPlugin, skillwindow::SkillWindowPlugin, loot::LootPlugin, statswindow::StatusWindowPlugin, worldmap::WorldMapPlugin));
     }
     app.run();
 }
