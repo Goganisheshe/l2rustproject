@@ -581,7 +581,7 @@ fn inventory_window(
     roots: Query<Entity, With<InventoryRoot>>,
     mut uses: ResMut<UseQueue>,
     mut opened_by_env: Local<bool>,
-    mut click: ResMut<ItemClick>,
+    (mut click, mut menu): (ResMut<ItemClick>, ResMut<crate::l2ui::UiClicks>),
     iface: Option<Res<crate::l2ui::Interface>>,
 ) {
     if let Some(id) = click.0.take() {
@@ -593,7 +593,7 @@ fn inventory_window(
         *opened_by_env = true;
         ui.open = true;
     }
-    let toggle = keys.just_pressed(KeyCode::KeyI) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::Select));
+    let toggle = menu.take("Menu", "Inventory") || keys.just_pressed(KeyCode::KeyI) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::Select));
     if toggle {
         ui.open = !ui.open;
         ui.shown = None;

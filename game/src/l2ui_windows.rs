@@ -37,7 +37,7 @@ fn system_menu(
     let open = find_root(&roots, "SystemMenuWnd");
     let by_env = !*env_done && std::env::var_os("L2_SYSMENU").is_some();
     *env_done = true;
-    if by_env || alt && keys.just_pressed(KeyCode::KeyX) || (open.is_some() && keys.just_pressed(KeyCode::Escape)) {
+    if by_env || clicks.take("Menu", "SystemMenu") || alt && keys.just_pressed(KeyCode::KeyX) || (open.is_some() && keys.just_pressed(KeyCode::Escape)) {
         match open {
             Some(e) => commands.entity(e).despawn(),
             None => {
@@ -60,10 +60,10 @@ fn system_menu(
     if clicks.take("SystemMenuWnd", "btnQuit") {
         exit.write(AppExit::Success);
     }
-    for (_, c) in clicks.0.iter().filter(|(w, _)| w == "SystemMenuWnd") {
+    for (_, c) in clicks.0.iter().filter(|(w, c)| w == "SystemMenuWnd" || (w == "Menu" && matches!(c.as_str(), "Action" | "Clan"))) {
         log.push(format!("{c}: not available offline."));
     }
-    clicks.0.retain(|(w, _)| w != "SystemMenuWnd");
+    clicks.0.retain(|(w, c)| w != "SystemMenuWnd" && !(w == "Menu" && matches!(c.as_str(), "Action" | "Clan")));
 }
 
 fn screen(windows: &Query<&Window>) -> Vec2 {
@@ -241,10 +241,11 @@ fn status_wnd(
     mut lib: ResMut<L2Library>,
     mut images: ResMut<Assets<Image>>,
     mut env_done: Local<bool>,
+    mut clicks: ResMut<crate::l2ui::UiClicks>,
 ) {
     let Some(iface) = iface else { return };
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    if alt && keys.just_pressed(KeyCode::KeyT) {
+    if clicks.take("Menu", "Character") || alt && keys.just_pressed(KeyCode::KeyT) {
         open.0 = !open.0;
     }
     if !*env_done && std::env::var_os("L2_STATUS").is_some() {

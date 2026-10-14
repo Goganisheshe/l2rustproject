@@ -108,10 +108,10 @@ fn skill_window(
     mut log: ResMut<Log>,
     hero: Single<(&mut HeroStats, Option<&mut Inventory>, Option<&mut HeroSkills>), With<Hero>>,
     roots: Query<Entity, With<SkillRoot>>,
-    ua: crate::l2ui::UiAssets,
+    (ua, mut menu): (crate::l2ui::UiAssets, ResMut<crate::l2ui::UiClicks>),
     mut icons: Local<std::collections::HashMap<String, Option<Handle<Image>>>>,
 ) {
-    let toggle = keys.just_pressed(KeyCode::KeyK) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::RightThumb));
+    let toggle = menu.take("Menu", "Skill") || keys.just_pressed(KeyCode::KeyK) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::RightThumb));
     if toggle {
         ui.open = !ui.open;
         ui.shown = None;

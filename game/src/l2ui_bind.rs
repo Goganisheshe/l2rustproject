@@ -64,6 +64,7 @@ fn build_hud(
             ));
         }
     }
+    spawn_menu_bar(&mut commands, &mut tex, &mut lib, &mut images);
     // The horizontal shortcut bar is a sub-window of ShortcutWnd with its own
     // default position.
     if let Some(sw) = x.window("ShortcutWnd") {
@@ -72,6 +73,58 @@ fn build_hud(
             sub.windows = vec![h.clone()];
             spawn_window(&mut commands, &iface, &sub, "ShortcutWndHorizontal", screen, &hidden, &mut tex, &mut lib, &mut images);
         }
+    }
+}
+
+/// Buttons of the main menu bar, in the client's order.
+pub const MENU_BUTTONS: [&str; 8] = ["Character", "Inventory", "Action", "Skill", "Quest", "Clan", "Map", "SystemMenu"];
+
+/// A main menu button and its three states.
+#[derive(Component)]
+struct MenuButton {
+    normal: Handle<Image>,
+    over: Handle<Image>,
+    down: Handle<Image>,
+}
+
+/// The main menu (bottom right). The client draws it with a Flash movie,
+/// so it is rebuilt here from its `Icon_DF_MenuWnd_*` button art; clicks
+/// arrive as `UiClicks` from window "Menu".
+fn spawn_menu_bar(commands: &mut Commands, tex: &mut UiTextures, lib: &mut L2Library, images: &mut Assets<Image>) {
+    let bar = commands
+        .spawn((
+            UiWindow("Menu".into()),
+            Node { position_type: PositionType::Absolute, right: Val::Px(4.0), bottom: Val::Px(12.0), column_gap: Val::Px(-12.0), ..default() },
+        ))
+        .id();
+    for name in MENU_BUTTONS {
+        let get = |suffix: &str, tex: &mut UiTextures, lib: &mut L2Library, images: &mut Assets<Image>| tex.get(&format!("L2UI_CT1.Icon.Icon_DF_MenuWnd_{name}{suffix}"), lib, images).map(|t| t.image);
+        let Some(normal) = get("", tex, lib, images) else { continue };
+        let over = get("_Over", tex, lib, images).unwrap_or(normal.clone());
+        let down = get("_Down", tex, lib, images).unwrap_or(normal.clone());
+        commands
+            .spawn((ImageNode::new(normal.clone()), Node { width: Val::Px(52.0), height: Val::Px(52.0), ..default() }, MenuButton { normal, over, down }, ChildOf(bar)))
+            .observe(|e: On<bevy::picking::events::PointerOver>, mut q: Query<(&MenuButton, &mut ImageNode)>| {
+                if let Ok((b, mut img)) = q.get_mut(e.entity) {
+                    img.image = b.over.clone();
+                }
+            })
+            .observe(|e: On<bevy::picking::events::PointerOut>, mut q: Query<(&MenuButton, &mut ImageNode)>| {
+                if let Ok((b, mut img)) = q.get_mut(e.entity) {
+                    img.image = b.normal.clone();
+                }
+            })
+            .observe(|e: On<bevy::picking::events::PointerPress>, mut q: Query<(&MenuButton, &mut ImageNode)>| {
+                if let Ok((b, mut img)) = q.get_mut(e.entity) {
+                    img.image = b.down.clone();
+                }
+            })
+            .observe(move |e: On<bevy::picking::events::PointerClick>, mut q: Query<(&MenuButton, &mut ImageNode)>, mut clicks: ResMut<crate::l2ui::UiClicks>| {
+                if let Ok((b, mut img)) = q.get_mut(e.entity) {
+                    img.image = b.over.clone();
+                }
+                clicks.0.push(("Menu".into(), name.into()));
+            });
     }
 }
 

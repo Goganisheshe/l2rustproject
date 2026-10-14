@@ -162,9 +162,10 @@ fn world_map(
     mut locs: Query<&mut Text, With<LocationText>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     mut ua: crate::l2ui::UiAssets,
+    mut menu: ResMut<crate::l2ui::UiClicks>,
     mut env_opened: Local<bool>,
 ) {
-    let mut toggle = keys.just_pressed(KeyCode::KeyM) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::LeftThumb));
+    let mut toggle = menu.take("Menu", "Map") || keys.just_pressed(KeyCode::KeyM) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::LeftThumb));
     if !*env_opened && std::env::var_os("L2_MAP").is_some() {
         *env_opened = true;
         toggle = true;
