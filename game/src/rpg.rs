@@ -887,14 +887,32 @@ fn hero_regen_and_death(
     windows: Query<Entity, With<DeathWindow>>,
     hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
     mut anims: Query<&mut Animated>,
+    mut ua: crate::l2ui::UiAssets,
+    mut clicks: ResMut<crate::l2ui::UiClicks>,
+    mut died: Local<bool>,
 ) {
     let dt = time.delta_secs();
     let (h, mut tr, mut stats) = hero.into_inner();
+    // Tests: `L2_DIE` kills the hero once, a few seconds in.
+    if !*died && std::env::var_os("L2_DIE").is_some() && time.elapsed_secs() > 8.0 {
+        *died = true;
+        stats.hp = 0.0;
+    }
     if stats.hp <= 0.0 {
         if stats.dead_timer == 0.0 {
             log.push("You have died.");
             stats.attacking = false;
             revive.0 = false;
+            // The client's restart menu, with only "To Village" offered.
+            let screen = ua.screen();
+            let framed = ua.iface.as_deref().and_then(|i| {
+                let keep = |n: &str| n.starts_with("btn") && n != "btnVillage" || n.contains("Penalty");
+                crate::l2ui::spawn_window(&mut commands, i, &i.0, "RestartMenuWnd", screen, &keep, &mut ua.tex, &mut ua.lib, &mut ua.images)
+            });
+            if let Some(root) = framed {
+                commands.entity(root).insert(DeathWindow).entry::<Node>().and_modify(|mut n| n.height = Val::Px(43.0));
+            }
+            if framed.is_none() {
             commands
                 .spawn((
                     DeathWindow,
@@ -922,6 +940,10 @@ fn hero_regen_and_death(
                     })
                     .observe(|_: On<bevy::picking::events::PointerClick>, mut flag: ResMut<ReviveClicked>| flag.0 = true);
                 });
+            }
+        }
+        if clicks.take("RestartMenuWnd", "btnVillage") {
+            revive.0 = true;
         }
         stats.dead_timer += dt;
         if let Ok(mut a) = anims.get_mut(h.actor) {

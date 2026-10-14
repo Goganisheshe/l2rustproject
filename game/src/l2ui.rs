@@ -102,6 +102,18 @@ impl UiAssets<'_, '_> {
     }
 }
 
+/// Buttons of client windows clicked this frame, as (window, control).
+#[derive(Resource, Default)]
+pub struct UiClicks(pub Vec<(String, String)>);
+
+impl UiClicks {
+    /// Whether `ctrl` of `window` was clicked (consumes the click).
+    pub fn take(&mut self, window: &str, ctrl: &str) -> bool {
+        let i = self.0.iter().position(|(w, c)| w == window && c == ctrl);
+        i.map(|i| self.0.remove(i)).is_some()
+    }
+}
+
 /// Header text of a framed window.
 #[derive(Component)]
 pub struct WindowTitle;
@@ -126,7 +138,10 @@ pub struct L2UiPlugin;
 
 impl Plugin for L2UiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UiTextures>().add_systems(PreStartup, load_interface);
+        app.init_resource::<UiTextures>()
+            .init_resource::<UiClicks>()
+            .add_systems(PreStartup, load_interface)
+            .add_systems(Last, |mut c: ResMut<UiClicks>| c.0.clear());
     }
 }
 
@@ -377,6 +392,8 @@ pub fn spawn_window(
                 if let Some(t) = tex.get(e.str("normalTex"), lib, images) {
                     commands.entity(id).insert(image_node(&t, None));
                 }
+                let (w, c) = (win.name().to_string(), n.to_string());
+                commands.entity(id).observe(move |_: On<bevy::picking::events::PointerClick>, mut clicks: ResMut<UiClicks>| clicks.0.push((w.clone(), c.clone())));
                 let label = e.str("buttonNameText");
                 let label = if label.is_empty() || label == "undefined" { iface.string(e.int("buttonName")).unwrap_or("") } else { label };
                 if !label.is_empty() {
