@@ -30,14 +30,36 @@ runs the survivors prototype described below.
 
 World data comes from the L2J Mobius Classic 3.0 datapack (`L2_DATAPACK`,
 default `G:/visery/l2-datapack/classic`): NPC stats and spawns, class
-templates, experience, server skills and class skill trees. Combat: Tab /
-click / RB target, F / X auto-attack; skills are learned automatically as you
-level (SP is spent) and sit on the 1–9 hotbar (gamepad: LB + A/B/X/Y = 1–4,
-LT + A/B/X/Y = 5–8). Items: starting kit per class, equipment stats (P.Atk/P.Def/M.Atk/M.Def/
-attack speed), monster drop lists with auto-loot and adena; inventory window
-on I / gamepad Select (Enter / A equips). Test helpers: `L2_INVENTORY=1`,
-`L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
-`L2_DEBUG_NPC=1`, `L2_START="x,y,z"`.
+templates, experience, server skills and class skill trees, items, shops,
+teleports and the quest pages. What is playable:
+
+- Combat: Tab / click / RB target, F / X auto-attack; skills are learned
+  automatically as you level (SP is spent) and sit on the 1–9 hotbar
+  (gamepad: LB + A/B/X/Y = 1–4, LT + A/B/X/Y = 5–8). Monsters and bosses use
+  the offensive skills of their datapack `skillList`.
+- Items: starting kit, equipment stats, drops with auto-loot; inventory on I /
+  gamepad Select (Enter / A equips or uses). Equipped armor and weapons
+  change the hero's model (client `armorgrp` / `weapongrp`), weapons switch
+  the animation stance. Scrolls of escape / teleport and potions work.
+- NPCs: F / X or a second click on a friendly NPC walks up and opens its
+  dialog (datapack HTML). Links by mouse or Up/Down + Enter / A; Esc / B
+  closes. Merchants buy and sell, multisell exchanges, gatekeepers teleport
+  (free up to level 40).
+- Quests: all 41 quests of the datapack are ported to Rust (`game/src/quests`),
+  including the tutorial, the newbie chains of every race and Saga of Legend.
+  Started quests are tracked on the left.
+- Classes: transfer at 20, 40 and 76 (the third needs Saga of Legend) from a
+  window that opens by itself (K / D-pad right reopens).
+- Bosses: raid bosses with their escorts, grand bosses in their lairs (Baium
+  wakes from his statue). Their HP and attack are scaled for one player:
+  `L2_BOSS_HP` (default 0.05) and `L2_BOSS_ATK` (0.6).
+- Saving: every minute, on F5 and on exit to `saves/hero.json` (`L2_SAVE`);
+  C / gamepad Y on the character screen continues.
+
+Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
+`L2_DEBUG_NPC=1`, `L2_START="x,y,z"`, `L2_LEVEL=<n>`, `L2_CLASS_PICK=<i>`,
+`L2_TALK=<npc id>` with `L2_BYPASS="cmd|cmd"`, `L2_CONTINUE=1`,
+`L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`.
 
 A run starts on the character screen: 16 race/sex/archetype combinations
 (human fighter/mystic, elf, dark elf, orc fighter/mystic, dwarf, kamael),
