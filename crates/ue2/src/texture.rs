@@ -157,3 +157,17 @@ fn read_palette(pkg: &Package, export: usize) -> Result<Vec<[u8; 4]>, Error> {
     }
     Ok(out)
 }
+
+/// Undecoded bytes of mip 0 (e.g. 16-bit heights of a G16 heightmap).
+pub fn raw_mip0(pkg: &Package, export: usize) -> Result<Vec<u8>, Error> {
+    let e = &pkg.exports[export];
+    let data = pkg.export_data(export);
+    let mut r = Reader::new(data);
+    let props = Properties::read(pkg, &mut r)?;
+    let format = Format::from_byte(props.byte(pkg, "Format").unwrap_or(0));
+    let w = props.int(pkg, "USize").unwrap_or(0) as usize;
+    let h = props.int(pkg, "VSize").unwrap_or(0) as usize;
+    let size = format.data_size(w, h).ok_or_else(|| Error::Format(format!("unsupported format {format:?}")))?;
+    let start = find_mip0(data, r.pos, e.serial_offset, size).ok_or_else(|| Error::Format("mip 0 not found".into()))?;
+    Ok(data[start..start + size].to_vec())
+}

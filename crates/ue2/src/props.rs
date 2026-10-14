@@ -190,3 +190,37 @@ pub fn class_defaults(pkg: &Package, export: usize) -> Option<Properties> {
         (r.remaining() == 0 && !p.0.is_empty()).then_some(p)
     })
 }
+
+/// `RF_HasStack`: the object starts with a script state frame.
+pub const RF_HAS_STACK: u32 = 0x0200_0000;
+
+/// Reads an export's tagged properties, skipping the state frame that
+/// actors (and other objects with `RF_HasStack`) serialize first.
+/// Returns the properties and the offset right after them.
+pub fn read_object(pkg: &Package, export: usize) -> Result<(Properties, usize), Error> {
+    let data = pkg.export_data(export);
+    let mut r = Reader::new(data);
+    if pkg.exports.get(export).is_some_and(|e| e.flags & RF_HAS_STACK != 0) {
+        let node = r.compact()?;
+        r.compact()?; // state node
+        r.skip(8)?; // probe mask
+        r.i32()?; // latent action
+        if node != 0 {
+            r.compact()?; // code offset
+        }
+    }
+    let p = Properties::read(pkg, &mut r)?;
+    Ok((p, r.pos))
+}
+
+impl Properties {
+    /// Native `Rotator` struct: pitch, yaw, roll (65536 = full turn).
+    pub fn rotator(&self, pkg: &Package, name: &str) -> Option<[i32; 3]> {
+        let d = self.raw(pkg, name)?;
+        if d.len() < 12 {
+            return None;
+        }
+        let f = |i: usize| i32::from_le_bytes(d[i * 4..i * 4 + 4].try_into().unwrap());
+        Some([f(0), f(1), f(2)])
+    }
+}

@@ -16,6 +16,7 @@ fn main() -> Result<()> {
         Some("effect") => dump_effect(&args[2], &args[3]),
         Some("defaults") => class_defaults(&args[2], &args[3]),
         Some("dat") => dat_summary(&args[2]),
+        Some("map") => map_info(&args[2], &args[3]),
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
@@ -296,9 +297,9 @@ pub fn mat_alpha(client: &str, package: &str, material: &str) -> Result<()> {
 pub fn dump_props(path: &str, object: &str) -> Result<()> {
     let pkg = Package::open(path)?;
     let idx = pkg.find_export(object).with_context(|| format!("no export {object}"))?;
-    let mut r = ue2::Reader::new(pkg.export_data(idx));
-    let props = ue2::props::Properties::read(&pkg, &mut r)?;
-    println!("{} ({}), {} bytes after properties", object, pkg.class_name(&pkg.exports[idx]), r.remaining());
+    let (props, end) = ue2::props::read_object(&pkg, idx)?;
+    let remaining = pkg.export_data(idx).len() - end;
+    println!("{} ({}), {} bytes after properties", object, pkg.class_name(&pkg.exports[idx]), remaining);
     for p in &props.0 {
         let v = match &p.value {
             ue2::props::Value::Object(o) => format!("Object {}", pkg.full_name(ue2::ObjectRef::from_raw(*o))),
@@ -408,6 +409,42 @@ pub fn dat_summary(client: &str) -> Result<()> {
     }
     for n in npcs.iter().filter(|n| n.mesh.to_ascii_lowercase().contains("gremlin")).take(3) {
         println!("  npc {:?}", n);
+    }
+    Ok(())
+}
+
+/// Summarizes a map tile: actors and terrain layers.
+pub fn map_info(client: &str, map: &str) -> Result<()> {
+    let mut lib = ue2::library::Library::new(client)?;
+    let pkg = lib.package(map).with_context(|| format!("no map {map}"))?;
+    let tile = ue2::world::read_map(&pkg)?;
+    println!("{} static mesh actors, {} terrains", tile.actors.len(), tile.terrains.len());
+    let mut resolved = 0;
+    for a in &tile.actors {
+        if lib.resolve(&pkg, a.mesh).is_some() {
+            resolved += 1;
+        }
+    }
+    println!("meshes resolved: {resolved}/{}", tile.actors.len());
+    for a in tile.actors.iter().take(3) {
+        println!("  {} at {:?} rot {:?} scale {:?}", pkg.full_name(a.mesh), a.location, a.rotation, a.scale);
+    }
+    for t in &tile.terrains {
+        let hm = lib.resolve(&pkg, t.heightmap).with_context(|| "heightmap")?;
+        let h = ue2::world::read_heightmap(&hm.package, hm.export)?;
+        println!(
+            "terrain at {:?} scale {:?}, heightmap {}x{} ({}..{}), {} layers",
+            t.location,
+            t.scale,
+            h.width,
+            h.height,
+            h.data.iter().min().unwrap_or(&0),
+            h.data.iter().max().unwrap_or(&0),
+            t.layers.len()
+        );
+        for l in &t.layers {
+            println!("  layer {} alpha {} u{} v{}", pkg.full_name(l.texture), pkg.full_name(l.alpha_map), l.uscale, l.vscale);
+        }
     }
     Ok(())
 }

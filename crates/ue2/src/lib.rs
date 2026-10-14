@@ -11,6 +11,7 @@ pub mod props;
 pub mod reader;
 pub mod skel;
 pub mod texture;
+pub mod world;
 
 pub use package::{Export, Import, ObjectRef, Package};
 pub use reader::Reader;

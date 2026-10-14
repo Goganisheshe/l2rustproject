@@ -8,6 +8,7 @@ mod l2assets;
 mod skinned;
 mod survivor;
 mod viewer;
+mod world;
 
 use bevy::prelude::*;
 
@@ -21,10 +22,14 @@ fn main() {
     .add_plugins(gamedata::GameDataPlugin)
     .add_systems(Update, debug_screenshot)
     .add_systems(Startup, cyrillic_font);
-    match std::env::var("L2_MODEL") {
-        Ok(spec) => app.add_plugins(viewer::ViewerPlugin { spec }),
-        Err(_) => app.add_plugins(survivor::SurvivorPlugin),
-    };
+    if let Ok(tiles) = std::env::var("L2_WORLD") {
+        let tiles = tiles.split(',').map(|t| t.trim().to_string()).collect();
+        app.add_plugins(world::WorldPlugin { tiles });
+    } else if let Ok(spec) = std::env::var("L2_MODEL") {
+        app.add_plugins(viewer::ViewerPlugin { spec });
+    } else {
+        app.add_plugins(survivor::SurvivorPlugin);
+    }
     app.run();
 }
 

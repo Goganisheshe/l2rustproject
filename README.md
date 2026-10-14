@@ -41,6 +41,9 @@ Environment variables:
 - `L2_CLIENT_DIR` — client root.
 - `L2_GROUND=<package>:<texture>` — ground texture, e.g.
   `ertheia_v_t:ertheia_a_ground00` (default).
+- `L2_WORLD=<tile>[,<tile>...]` — world viewer instead of the game, e.g.
+  `20_21` (Dion / Cruma). WASD/left stick move, Q/E or triggers down/up,
+  arrows/right stick look, Shift/A faster.
 - `L2_CLASS=<prefix>` — skip the character screen, e.g. `FElf`, `MKamael`.
 - `L2_SKILLS=<id,id,...>` — starting skills, e.g. `1177,1239`.
 - `L2_LIST_SKILLS=<file>` — write the playable skill table (id, name,
@@ -74,6 +77,7 @@ cargo run --release -p l2tool -- dat <client>                # decode skillgrp/n
 cargo run --release -p l2tool -- props <package> <export>     # tagged properties
 cargo run --release -p l2tool -- defaults <package> <class>   # class default properties
 cargo run --release -p l2tool -- effect <package> <class>     # effect emitters
+cargo run --release -p l2tool -- map <client> <tile>           # map actors and terrain layers
 cargo run --release -p l2tool -- hex <package> <export> [n]
 ```
 
@@ -132,3 +136,10 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   and `FlyingTime`; defaults are found by scanning for a clean property stream.
 - Effect draw styles: Darken = dst * (1 - src) is emitted as black with alpha =
   source brightness; Modulated approximated with multiply.
+- Maps: actors with `RF_HasStack` start with a script state frame (node,
+  state node, probe mask, latent action, offset if node) before properties.
+  StaticMeshActor gives StaticMesh/Location/Rotation/DrawScale(3D).
+  TerrainInfo: G16 heightmap, vertex = Location + ((i - w/2) * Sx,
+  (j - h/2) * Sy, (h - 32768) * Sz / 256), layers = texture + alpha map +
+  UScale/VScale. Tiles are 256 x 128 UU. The viewer bakes layers into one
+  2048² texture per tile.
