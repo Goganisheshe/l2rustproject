@@ -556,6 +556,10 @@ pub struct TreeEntry {
     pub level: u32,
     pub get_level: u32,
     pub sp: u64,
+    /// Items paid on learning (spellbooks, Adena).
+    pub items: Vec<(u32, u64)>,
+    /// Given automatically on reaching the level.
+    pub auto_get: bool,
 }
 
 #[derive(Resource, Default)]
@@ -642,6 +646,12 @@ pub fn load_skills(root: &Path) -> SkillBook {
                     level: attr(c, "skillLevel")?,
                     get_level: attr(c, "getLevel").unwrap_or(1),
                     sp: attr(c, "levelUpSp").unwrap_or(0),
+                    items: c
+                        .children()
+                        .filter(|i| i.has_tag_name("item"))
+                        .filter_map(|i| Some((attr(i, "id")?, attr(i, "count").unwrap_or(1))))
+                        .collect(),
+                    auto_get: c.attribute("autoGet") == Some("true"),
                 })
             })
             // Item-unlocked entries (inventory tickets etc.) are not class skills.

@@ -19,7 +19,7 @@ use crate::mmo::{Hero, Phase};
 use crate::rpg::{award_kill, template_for_stats, Buff, HeroStats, Log, Npc, NpcState, Target};
 use crate::skinned::Animated;
 
-const HOTBAR: usize = 9;
+pub const HOTBAR: usize = 9;
 
 pub struct SkillPlayPlugin;
 
@@ -61,8 +61,8 @@ struct Cast {
     fired: bool,
 }
 
-/// Learns every tree skill the hero qualifies for (auto-learn: the offline
-/// game has no skill master yet), paying SP like the client would.
+/// Gives the class tree's `autoGet` skills on reaching their level; the rest
+/// are learned for SP in the skill window (`skillwindow.rs`).
 fn learn_skills(
     mut commands: Commands,
     book: Res<SkillBook>,
@@ -85,7 +85,7 @@ fn learn_skills(
         changed = false;
         for entry in &tree {
             let have = skills.learned.get(&entry.skill).copied().unwrap_or(0);
-            if entry.get_level > stats.level || entry.level != have + 1 || stats.sp < entry.sp {
+            if !entry.auto_get || entry.get_level > stats.level || entry.level != have + 1 || stats.sp < entry.sp {
                 continue;
             }
             let Some(def) = book.skills.get(&entry.skill) else { continue };

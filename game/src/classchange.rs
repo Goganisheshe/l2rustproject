@@ -78,13 +78,13 @@ fn class_change(
     let third = dp.class_depth(class) == 2;
     let eligible =
         !options.is_empty() && transfer_level(dp.class_depth(class)).is_some_and(|l| stats.level >= l) && (!third || saga_done);
-    // Opens by itself once per class when the hero qualifies; K / D-pad right reopens.
+    // Opens by itself once per class when the hero qualifies; C / D-pad right reopens.
     if eligible && ui.prompted != Some(class) {
         ui.prompted = Some(class);
         ui.open = true;
-        log.push("You can change your class now (K).");
+        log.push("You can change your class now (C).");
     }
-    if keys.just_pressed(KeyCode::KeyK) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::DPadRight)) {
+    if keys.just_pressed(KeyCode::KeyC) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::DPadRight)) {
         ui.open = !ui.open;
         if ui.open && !eligible {
             ui.open = false;

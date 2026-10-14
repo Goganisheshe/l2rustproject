@@ -32,9 +32,12 @@ default `G:/visery/l2-datapack/classic`): NPC stats and spawns, class
 templates, experience, server skills and class skill trees, items, shops,
 teleports and the quest pages. What is playable:
 
-- Combat: Tab / click / RB target, F / X auto-attack; skills are learned
-  automatically as you level (SP is spent) and sit on the 1–9 hotbar
-  (gamepad: LB + A/B/X/Y = 1–4, LT + A/B/X/Y = 5–8). Monsters and bosses use
+- Combat: Tab / click / RB target, F / X auto-attack; skills sit on the 1–9
+  hotbar (gamepad: LB + A/B/X/Y = 1–4, LT + A/B/X/Y = 5–8).
+- Skills: as in Classic, the skill window (K / right stick press) learns the
+  class tree's next levels for SP (plus spellbooks or Adena where the tree
+  asks); only `autoGet` skills come by themselves. Clicking a learned active
+  skill puts it on the hotbar or takes it off. `L2_SKILL_WINDOW=1` opens it. Monsters and bosses use
   the offensive skills of their datapack `skillList`.
 - Items: starting kit, equipment stats, drops with auto-loot; inventory on I /
   gamepad Select (Enter / A equips or uses). Equipped armor and weapons
@@ -48,7 +51,7 @@ teleports and the quest pages. What is playable:
   including the tutorial, the newbie chains of every race and Saga of Legend.
   Started quests are tracked on the left.
 - Classes: transfer at 20, 40 and 76 (the third needs Saga of Legend) from a
-  window that opens by itself (K / D-pad right reopens).
+  window that opens by itself (C / D-pad right reopens).
 - Bosses: raid bosses with their escorts, grand bosses in their lairs (Baium
   wakes from his statue). Their HP and attack are scaled for one player:
   `L2_BOSS_HP` (default 0.05) and `L2_BOSS_ATK` (0.6).
