@@ -14,26 +14,35 @@ pub struct CharClass {
     pub package: &'static str,
     /// Mesh/texture name prefix, e.g. `MFighter`.
     pub prefix: &'static str,
+    /// Starting one-handed weapon from `lineageweapons.ukx`.
+    pub weapon: &'static str,
 }
 
 pub const CLASSES: &[CharClass] = &[
-    CharClass { name: "Human Fighter (M)", package: "fighter", prefix: "MFighter" },
-    CharClass { name: "Human Fighter (F)", package: "fighter", prefix: "FFighter" },
-    CharClass { name: "Human Mystic (M)", package: "magic", prefix: "MMagic" },
-    CharClass { name: "Human Mystic (F)", package: "magic", prefix: "FMagic" },
-    CharClass { name: "Elf (M)", package: "elf", prefix: "MElf" },
-    CharClass { name: "Elf (F)", package: "elf", prefix: "FElf" },
-    CharClass { name: "Dark Elf (M)", package: "darkelf", prefix: "MDarkElf" },
-    CharClass { name: "Dark Elf (F)", package: "darkelf", prefix: "FDarkElf" },
-    CharClass { name: "Orc Fighter (M)", package: "orc", prefix: "MOrc" },
-    CharClass { name: "Orc Fighter (F)", package: "orc", prefix: "FOrc" },
-    CharClass { name: "Orc Mystic (M)", package: "shaman", prefix: "MShaman" },
-    CharClass { name: "Orc Mystic (F)", package: "shaman", prefix: "FShaman" },
-    CharClass { name: "Dwarf (M)", package: "dwarf", prefix: "MDwarf" },
-    CharClass { name: "Dwarf (F)", package: "dwarf", prefix: "FDwarf" },
-    CharClass { name: "Kamael (M)", package: "kamael", prefix: "MKamael" },
-    CharClass { name: "Kamael (F)", package: "kamael", prefix: "FKamael" },
+    CharClass { name: "Human Fighter (M)", package: "fighter", prefix: "MFighter", weapon: "falchion_m00_wp" },
+    CharClass { name: "Human Fighter (F)", package: "fighter", prefix: "FFighter", weapon: "falchion_m00_wp" },
+    CharClass { name: "Human Mystic (M)", package: "magic", prefix: "MMagic", weapon: "apprentices_rod_m00_wp" },
+    CharClass { name: "Human Mystic (F)", package: "magic", prefix: "FMagic", weapon: "apprentices_rod_m00_wp" },
+    CharClass { name: "Elf (M)", package: "elf", prefix: "MElf", weapon: "knife_m00_wp" },
+    CharClass { name: "Elf (F)", package: "elf", prefix: "FElf", weapon: "knife_m00_wp" },
+    CharClass { name: "Dark Elf (M)", package: "darkelf", prefix: "MDarkElf", weapon: "knife_m00_wp" },
+    CharClass { name: "Dark Elf (F)", package: "darkelf", prefix: "FDarkElf", weapon: "knife_m00_wp" },
+    CharClass { name: "Orc Fighter (M)", package: "orc", prefix: "MOrc", weapon: "tomahawk_m00_wp" },
+    CharClass { name: "Orc Fighter (F)", package: "orc", prefix: "FOrc", weapon: "tomahawk_m00_wp" },
+    CharClass { name: "Orc Mystic (M)", package: "shaman", prefix: "MShaman", weapon: "apprentices_rod_m00_wp" },
+    CharClass { name: "Orc Mystic (F)", package: "shaman", prefix: "FShaman", weapon: "apprentices_rod_m00_wp" },
+    CharClass { name: "Dwarf (M)", package: "dwarf", prefix: "MDwarf", weapon: "club_m00_wp" },
+    CharClass { name: "Dwarf (F)", package: "dwarf", prefix: "FDwarf", weapon: "club_m00_wp" },
+    CharClass { name: "Kamael (M)", package: "kamael", prefix: "MKamael", weapon: "falchion_m00_wp" },
+    CharClass { name: "Kamael (F)", package: "kamael", prefix: "FKamael", weapon: "falchion_m00_wp" },
 ];
+
+/// Weapon spec for `L2Library::rigid_mesh`: weapon meshes carry no material,
+/// their texture is `<name>_t00_wp` in `lineageweaponstex`.
+pub fn weapon_spec(class: &CharClass) -> String {
+    let base = class.weapon.trim_end_matches("_m00_wp");
+    format!("{}@lineageweaponstex/{base}_t00_wp", class.weapon)
+}
 
 /// Starter armor set id (`m001` = the novice outfit).
 const ARMOR: &str = "m001";

@@ -84,6 +84,14 @@ pub struct Model {
     actor: Transform,
     /// Bind-pose height in meters.
     pub height: f32,
+    /// Lowercase bone names, index-aligned with the joints.
+    bone_names: Vec<String>,
+}
+
+/// Rigid meshes (weapons, shields) hung on a named bone of a model instance.
+pub struct Attachment {
+    pub bone: &'static str,
+    pub parts: Vec<crate::l2assets::MeshPart>,
 }
 
 impl Model {
@@ -114,6 +122,20 @@ pub struct Animated {
 }
 
 impl Animated {
+    /// Plays `names` from the start even if it is already the current clip.
+    pub fn restart(&mut self, names: &[&str], looping: bool) {
+        if let Some(i) = names.iter().find_map(|n| self.model.clip(n)) {
+            self.clip = i;
+            self.time = 0.0;
+            self.looping = looping;
+        }
+    }
+
+    /// True once a non-looping clip has reached its last frame.
+    pub fn finished(&self) -> bool {
+        !self.looping && self.model.clips.get(self.clip).is_none_or(|c| self.time >= c.frames - 0.02)
+    }
+
     /// Switches to the first clip found among `names` (case-insensitive).
     pub fn play(&mut self, names: &[&str], looping: bool) {
         if let Some(i) = names.iter().find_map(|n| self.model.clip(n)) {
@@ -321,16 +343,33 @@ fn build_model(
         clips.len()
     );
 
-    Some(Model { parts, bindposes: bindposes.add(SkinnedMeshInverseBindposes::from(inverse)), rest, clips, actor, height })
+    let bone_names = bones.iter().map(|b| b.0.to_ascii_lowercase()).collect();
+    Some(Model {
+        parts,
+        bindposes: bindposes.add(SkinnedMeshInverseBindposes::from(inverse)),
+        rest,
+        clips,
+        actor,
+        height,
+        bone_names,
+    })
 }
 
 /// Spawns a model instance under `parent` and returns the actor entity.
-pub fn spawn_model(commands: &mut Commands, model: &Arc<Model>, parent: Entity, clip: &str) -> Entity {
+pub fn spawn_model(
+    commands: &mut Commands,
+    model: &Arc<Model>,
+    parent: Entity,
+    clip: &str,
+    attachments: &[Attachment],
+) -> Entity {
     let actor = commands.spawn((model.actor, Visibility::default(), ChildOf(parent))).id();
     let mut joints: Vec<Entity> = Vec::with_capacity(model.rest.len());
     for (i, (p, t, r)) in model.rest.iter().enumerate() {
         let parent_e = if i == 0 { actor } else { joints[*p] };
-        let e = commands.spawn((Transform::from_translation(*t).with_rotation(*r), ChildOf(parent_e))).id();
+        let e = commands
+            .spawn((Transform::from_translation(*t).with_rotation(*r), Visibility::default(), ChildOf(parent_e)))
+            .id();
         joints.push(e);
     }
     for (mesh, mat) in &model.parts {
@@ -341,6 +380,15 @@ pub fn spawn_model(commands: &mut Commands, model: &Arc<Model>, parent: Entity, 
             DynamicSkinnedMeshBounds,
             ChildOf(actor),
         ));
+    }
+    for a in attachments {
+        let Some(bone) = model.bone_names.iter().position(|n| n.eq_ignore_ascii_case(a.bone)) else {
+            warn!("no bone {} for attachment", a.bone);
+            continue;
+        };
+        for part in &a.parts {
+            commands.spawn((Mesh3d(part.mesh.clone()), MeshMaterial3d(part.material.clone()), ChildOf(joints[bone])));
+        }
     }
     let clip_idx = model.clip(clip).unwrap_or(0);
     commands.entity(actor).insert(Animated {

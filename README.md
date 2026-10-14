@@ -23,7 +23,9 @@ cargo run -p l2survivor
 
 A run starts on the character screen: 16 race/sex/archetype combinations
 (human fighter/mystic, elf, dark elf, orc fighter/mystic, dwarf, kamael),
-each assembled from the client's face, hair and starter-armor parts.
+each assembled from the client's face, hair and starter-armor parts and
+holding a class weapon (sword, rod, club, tomahawk or knife) on
+`Weapon_R_Bone`. Standing still, the hero turns and swings at each volley.
 
 Controls: WASD / arrows or the left stick / D-pad to move or pick, Enter /
 Space or gamepad A to confirm, Esc or Start to pause. Attacks are automatic.
@@ -87,3 +89,7 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   `Bip01_L_Finger01`); bones are matched by name and occurrence.
 - Under a Shader the diffuse alpha is a specular mask; only `Opacity` maps,
   `AlphaTest` (with `AlphaRef`) or flags on bare textures make cutouts.
+- Weapons are single-bone skeletal meshes in `animations/lineageweapons.ukx`
+  without a material; the texture is `lineageweaponstex.<name>_t00_wp`. They
+  hang rigidly on the character bone `Weapon_R_Bone` (`Shield_L_Bone` exists
+  for shields).

@@ -154,6 +154,52 @@ impl L2Library {
         Some(self.material(&h.package, ue2::ObjectRef::Export(h.export), materials, images))
     }
 
+    /// Loads a skeletal mesh as plain rigid geometry (no skinning), for
+    /// single-bone props such as weapons. `spec` is `mesh[@package/material]`.
+    pub fn rigid_mesh(
+        &mut self,
+        package: &str,
+        spec: &str,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> Option<Vec<MeshPart>> {
+        let (name, forced) = match spec.split_once('@') {
+            Some((n, m)) => (n, m.split_once('/')),
+            None => (spec, None),
+        };
+        let h = self.lib.as_mut()?.find(package, name)?;
+        let sm = match ue2::skel::read_skeletal_mesh(&h.package, h.export) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("{package}:{name}: {e}");
+                return None;
+            }
+        };
+        let forced = forced.and_then(|(p, o)| self.material_by_name(p, o, materials, images));
+        let positions: Vec<[f32; 3]> =
+            sm.positions.iter().map(|&p| ue_to_bevy(p).map(|c| c * UU_TO_M)).collect();
+        let normals: Vec<[f32; 3]> = sm.normals.iter().map(|&n| ue_to_bevy(n)).collect();
+        let mut parts = Vec::new();
+        for s in &sm.sections {
+            let range = s.first_index as usize..(s.first_index + s.num_indices) as usize;
+            let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sm.uvs.clone());
+            mesh.insert_indices(Indices::U32(sm.indices[range].to_vec()));
+            let material = match &forced {
+                Some(m) => m.clone(),
+                None => {
+                    let r = sm.materials.get(s.material).copied().unwrap_or_default();
+                    self.material(&h.package, r, materials, images)
+                }
+            };
+            parts.push(MeshPart { mesh: meshes.add(mesh), material });
+        }
+        Some(parts)
+    }
+
     /// Loads a static mesh as one Bevy mesh per section, already converted to
     /// Bevy axes and meters.
     pub fn static_mesh(

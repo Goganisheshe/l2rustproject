@@ -60,7 +60,15 @@ fn setup(
     {
         let names: Vec<&str> = model.clips.iter().map(|c| c.name.as_str()).collect();
         info!("clips: {}", names.join(", "));
-        spawn_model(&mut commands, &model, root, clip);
+        let weapon = parts.get(1).and_then(|k| crate::character::find_class(k)).filter(|_| parts[0] == "class");
+        let attach: Vec<crate::skinned::Attachment> = weapon
+            .and_then(|i| {
+                let spec = crate::character::weapon_spec(&crate::character::CLASSES[i]);
+                lib.rigid_mesh("lineageweapons", &spec, &mut meshes, &mut materials, &mut images)
+            })
+            .map(|parts| vec![crate::skinned::Attachment { bone: "Weapon_R_Bone", parts }])
+            .unwrap_or_default();
+        spawn_model(&mut commands, &model, root, clip, &attach);
     }
 }
 

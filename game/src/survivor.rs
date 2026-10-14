@@ -14,7 +14,8 @@ use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 
 use crate::character::{find_class, part_spec, CLASSES};
 use crate::l2assets::{L2Library, L2Textures};
-use crate::skinned::{spawn_model, Animated, Model, ModelCache};
+use crate::character::weapon_spec;
+use crate::skinned::{spawn_model, Animated, Attachment, Model, ModelCache};
 
 
 /// Enemy roster: (package, mesh, hp multiplier, speed, unlock minute).
@@ -29,7 +30,18 @@ const ENEMY_KINDS: &[(&str, &str, f32, f32, f32)] = &[
 #[derive(Resource, Default)]
 struct Roster {
     player: Option<Arc<Model>>,
+    /// Weapon geometry for the chosen class, hung on `Weapon_R_Bone`.
+    weapon: Vec<crate::l2assets::MeshPart>,
     enemies: Vec<(Arc<Model>, f32, f32, f32)>,
+}
+
+impl Roster {
+    fn attachments(&self) -> Vec<Attachment> {
+        if self.weapon.is_empty() {
+            return Vec::new();
+        }
+        vec![Attachment { bone: "Weapon_R_Bone", parts: self.weapon.clone() }]
+    }
 }
 
 /// Links a gameplay entity to its animated model instance.
@@ -121,6 +133,8 @@ struct Run {
     bolt_count: u32,
     bolt_pierce: u32,
     bolt_timer: f32,
+    /// Set when a volley fires; the player swings toward it if standing still.
+    swing: Option<Vec3>,
     aura_radius: f32,
     aura_dps: f32,
     spawn_timer: f32,
@@ -144,6 +158,7 @@ impl Default for Run {
             bolt_count: 1,
             bolt_pierce: 0,
             bolt_timer: 0.0,
+            swing: None,
             aura_radius: 0.0,
             aura_dps: 0.0,
             spawn_timer: 0.0,
@@ -381,7 +396,7 @@ fn start_run(
     let player = commands.spawn((Player, RunEntity, Transform::default(), Visibility::default())).id();
     match &roster.player {
         Some(model) => {
-            let actor = spawn_model(&mut commands, model, player, "wait_1HS");
+            let actor = spawn_model(&mut commands, model, player, "wait_1HS", &roster.attachments());
             commands.entity(player).insert(ModelLink(actor));
         }
         None => {
@@ -431,12 +446,24 @@ fn face(t: &mut Transform, dir: Vec3) {
 }
 
 /// Picks run / idle clips for the player from movement input.
-fn animate_player(input: Res<PlayerInput>, player: Single<&ModelLink, With<Player>>, mut anims: Query<&mut Animated>) {
-    let Ok(mut anim) = anims.get_mut(player.0) else { return };
+/// Run while moving; when standing, swing the weapon on each volley and
+/// fall back to the combat stance once the swing ends.
+fn animate_player(
+    input: Res<PlayerInput>,
+    mut run: ResMut<Run>,
+    player: Single<(&ModelLink, &mut Transform), With<Player>>,
+    mut anims: Query<&mut Animated>,
+) {
+    let swing = run.swing.take();
+    let (link, mut transform) = player.into_inner();
+    let Ok(mut anim) = anims.get_mut(link.0) else { return };
     if input.move_dir.length() > 0.1 {
         anim.play(&["Run_1HS", "run"], true);
-    } else {
-        anim.play(&["wait_1HS", "Wait"], true);
+    } else if let Some(aim) = swing {
+        face(&mut transform, aim);
+        anim.restart(&["Atk01_1HS", "atk01"], false);
+    } else if anim.looping || anim.finished() {
+        anim.play(&["AtkWait_1HS", "wait_1HS", "Wait"], true);
     }
 }
 
@@ -492,7 +519,7 @@ fn spawn_enemies(
             .id();
         match kind {
             Some((model, ..)) => {
-                let actor = spawn_model(&mut commands, model, enemy, "run");
+                let actor = spawn_model(&mut commands, model, enemy, "run", &[]);
                 commands.entity(enemy).insert(ModelLink(actor));
             }
             None => {
@@ -547,6 +574,7 @@ fn fire_bolts(
     };
     run.bolt_timer = run.bolt_cooldown;
     let aim = (nearest.translation - origin).with_y(0.0).normalize_or_zero();
+    run.swing = Some(aim);
     let n = run.bolt_count;
     for i in 0..n {
         let spread = (i as f32 - (n - 1) as f32 / 2.0) * 0.18;
@@ -748,12 +776,14 @@ fn select_menu(
         let spec = part_spec(&mut lib, class);
         let (meshes, materials, images, bindposes) = &mut assets;
         roster.player = cache.load(&mut lib, class.package, &spec, None, meshes, materials, images, bindposes);
+        roster.weapon =
+            lib.rigid_mesh("lineageweapons", &weapon_spec(class), meshes, materials, images).unwrap_or_default();
         // Face the camera (+Z); models look along +X.
         let root = commands
             .spawn((Preview, Transform::from_xyz(1.2, 0.0, 0.0).with_rotation(Quat::from_rotation_y(-FRAC_PI_2)), Visibility::default()))
             .id();
         if let Some(model) = &roster.player {
-            spawn_model(&mut commands, model, root, "wait_1HS");
+            spawn_model(&mut commands, model, root, "wait_1HS", &roster.attachments());
         }
     }
     if input.confirm || std::env::var_os("L2_CLASS").is_some() {
