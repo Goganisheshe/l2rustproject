@@ -29,6 +29,23 @@ impl Plugin for ClassChangePlugin {
     }
 }
 
+/// Race of a class, from the starting class at the root of its tree.
+fn race_of_class(dp: &Datapack, class: u32) -> crate::quest::Race {
+    use crate::quest::Race;
+    let mut c = class;
+    while let Some((_, Some(p))) = dp.class_list.get(&c) {
+        c = *p;
+    }
+    match c {
+        18 | 25 => Race::Elf,
+        31 | 38 => Race::DarkElf,
+        44 | 49 => Race::Orc,
+        53 => Race::Dwarf,
+        0 | 10 => Race::Human,
+        _ => Race::Kamael,
+    }
+}
+
 /// Level needed for the next transfer after `depth` transfers.
 pub fn transfer_level(depth: u32) -> Option<u32> {
     match depth {
@@ -48,12 +65,19 @@ fn class_change(
     dp: Res<Datapack>,
     mut ui: ResMut<ClassChangeUi>,
     mut log: ResMut<Log>,
-    mut stats: Single<&mut HeroStats, With<Hero>>,
+    mut qlog: ResMut<crate::quest::QuestLog>,
+    hero: Single<(&mut HeroStats, Option<&mut crate::items::Inventory>), With<Hero>>,
     roots: Query<Entity, With<ClassChangeRoot>>,
 ) {
+    let (mut stats, inv) = hero.into_inner();
     let class = stats.template.class_id;
     let options = dp.next_classes(class);
-    let eligible = !options.is_empty() && transfer_level(dp.class_depth(class)).is_some_and(|l| stats.level >= l);
+    // The third transfer needs the Saga of Legend (Orven in Aden).
+    let saga = crate::quests::story::SAGA_OF_LEGEND;
+    let saga_done = qlog.states.get(&saga).is_some_and(|q| q.is_completed());
+    let third = dp.class_depth(class) == 2;
+    let eligible =
+        !options.is_empty() && transfer_level(dp.class_depth(class)).is_some_and(|l| stats.level >= l) && (!third || saga_done);
     // Opens by itself once per class when the hero qualifies; K / D-pad right reopens.
     if eligible && ui.prompted != Some(class) {
         ui.prompted = Some(class);
@@ -65,6 +89,9 @@ fn class_change(
         if ui.open && !eligible {
             ui.open = false;
             match transfer_level(dp.class_depth(class)) {
+                Some(l) if !options.is_empty() && stats.level >= l && third => {
+                    log.push("Complete the Saga of Legend (Orven in Aden) for the third class transfer.")
+                }
                 Some(l) if !options.is_empty() => log.push(format!("Class transfer is available from level {l}.")),
                 _ => log.push("There is no further class transfer."),
             }
@@ -97,6 +124,17 @@ fn class_change(
         }
         stats.class_key = dp.class_name(new).to_string();
         stats.recalc();
+        // Saga of Legend: a mount spellbook for the race on the third transfer.
+        if third {
+            if let (Some(mut inv), Some(q)) = (inv, qlog.states.get_mut(&saga)) {
+                if q.get_int("mountRewarded") == 0 {
+                    q.set("mountRewarded", 1);
+                    let book = crate::quests::story::saga_mount(race_of_class(&dp, new));
+                    *inv.items.entry(book).or_default() += 1;
+                    log.push("You received a mount spellbook.");
+                }
+            }
+        }
         log.push(format!("Congratulations! You are now a {}.", dp.class_name(new)));
         ui.open = false;
         return;
