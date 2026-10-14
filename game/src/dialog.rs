@@ -184,7 +184,7 @@ impl Plugin for DialogPlugin {
             .init_resource::<ScreenMsg>()
             .init_resource::<QuestLog>()
             .insert_resource(Quests(crate::quests::all()))
-            .add_systems(Update, dialog_title)
+            .add_systems(Update, (dialog_title, quest_window.run_if(in_state(Phase::InWorld))))
             .add_systems(PreStartup, |mut commands: Commands| commands.insert_resource(Pages::load(&datapack_root())))
             .add_systems(OnEnter(Phase::InWorld), spawn_overlays)
             .add_systems(
@@ -758,4 +758,84 @@ fn quest_tracker(quests: Res<Quests>, qlog: Res<QuestLog>, mut text: Single<&mut
         s.push('\n');
     }
     text.0 = s;
+}
+
+#[derive(Component)]
+struct QuestWindow;
+
+/// Alt+U or the menu's quest button: the client's QuestTreeWnd with the
+/// started quests and where each one stands.
+#[allow(clippy::too_many_arguments)]
+fn quest_window(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    quests: Res<Quests>,
+    qlog: Res<QuestLog>,
+    mut ua: crate::l2ui::UiAssets,
+    mut clicks: ResMut<crate::l2ui::UiClicks>,
+    roots: Query<Entity, With<QuestWindow>>,
+    mut open: Local<bool>,
+    mut env_done: Local<bool>,
+) {
+    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    let by_env = !*env_done && std::env::var_os("L2_QUESTS").is_some();
+    *env_done = true;
+    let toggle = by_env || clicks.take("Menu", "Quest") || (alt && keys.just_pressed(KeyCode::KeyU));
+    if toggle {
+        *open = !*open;
+    } else if *open && keys.just_pressed(KeyCode::Escape) {
+        *open = false;
+    } else if !(*open && qlog.is_changed()) {
+        return;
+    }
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    if !*open {
+        return;
+    }
+    let screen = ua.screen();
+    let Some(i) = ua.iface.as_deref() else { return };
+    let hide = |n: &str| n.starts_with("MainTree") && n != "MainTreeBg" || n.starts_with("chk") || matches!(n, "QuestTreeTab" | "CheckBoxBg" | "btnDetailInfo" | "TexTabBgLine" | "txtQuestNum");
+    let Some(root) = crate::l2ui::spawn_window(&mut commands, i, &i.0, "QuestTreeWnd", screen, &hide, &mut ua.tex, &mut ua.lib, &mut ua.images) else { return };
+    commands.entity(root).insert(QuestWindow);
+    let (pos, size) = crate::l2ui::ctrl_rect(&i.0, "QuestTreeWnd", "MainTreeBg", screen).unwrap_or((Vec2::new(7.0, 76.0), Vec2::new(257.0, 295.0)));
+    let mut started: Vec<_> = qlog.states.iter().filter(|(_, st)| st.is_started()).collect();
+    started.sort_by_key(|(id, _)| **id);
+    if let Some((np, _)) = crate::l2ui::ctrl_rect(&i.0, "QuestTreeWnd", "txtQuestNum", screen) {
+        commands.spawn((
+            Text::new(format!("({}/40)", started.len())),
+            TextFont { font_size: FontSize::Px(11.0), ..default() },
+            TextColor(Color::srgb(0.85, 0.82, 0.75)),
+            Node { position_type: PositionType::Absolute, left: Val::Px(np.x), top: Val::Px(np.y), ..default() },
+            ChildOf(root),
+        ));
+    }
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(pos.x + 8.0),
+                top: Val::Px(pos.y + 6.0),
+                width: Val::Px(size.x - 16.0),
+                height: Val::Px(size.y - 12.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(3.0),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            ChildOf(root),
+        ))
+        .with_children(|p| {
+            if started.is_empty() {
+                p.spawn((Text::new("Нет взятых квестов."), TextFont { font_size: FontSize::Px(12.0), ..default() }, TextColor(Color::srgb(0.6, 0.6, 0.6))));
+            }
+            for (id, st) in started {
+                let Some(q) = quests.by_id(*id) else { continue };
+                p.spawn((Text::new(q.title()), TextFont { font_size: FontSize::Px(12.0), ..default() }, TextColor(Color::srgb(0.93, 0.8, 0.45))));
+                if let Some(line) = q.progress(st) {
+                    p.spawn((Text::new(format!("  {line}")), TextFont { font_size: FontSize::Px(11.0), ..default() }, TextColor(Color::srgb(0.85, 0.82, 0.75))));
+                }
+            }
+        });
 }
