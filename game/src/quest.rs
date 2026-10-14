@@ -49,6 +49,13 @@ impl QuestState {
     pub fn unset(&mut self, k: &str) {
         self.vars.remove(k);
     }
+    /// L2J memo state (a second progress counter some quests use).
+    pub fn memo(&self) -> i64 {
+        self.get_int("memoState")
+    }
+    pub fn set_memo(&mut self, v: i64) {
+        self.set("memoState", v);
+    }
     pub fn start_quest(&mut self) {
         self.state = QState::Started;
         self.cond = 1;
@@ -175,6 +182,38 @@ impl Player<'_> {
             self.log.push(format!("Level up! You are now level {new_level}"));
         }
     }
+    /// L2J `getRandom(n)`: 0..n.
+    pub fn random(&self, n: u32) -> u32 {
+        use rand::Rng;
+        rand::rng().random_range(0..n.max(1))
+    }
+    /// L2J `giveItemRandomly`: gives `amount` with probability `chance`
+    /// (0..1; whole parts are guaranteed drops), never beyond `limit`
+    /// (0 = none). Returns whether the limit is reached.
+    pub fn give_randomly(&mut self, item: u32, amount: u64, limit: u64, chance: f64) -> bool {
+        use rand::Rng;
+        let have = self.count(item);
+        if limit > 0 && have >= limit {
+            return true;
+        }
+        let mut n = amount * chance.floor() as u64;
+        if rand::rng().random_bool(chance.fract().clamp(0.0, 1.0)) {
+            n += amount;
+        }
+        if limit > 0 {
+            n = n.min(limit - have);
+        }
+        if n > 0 {
+            self.give(item, n);
+        }
+        limit > 0 && have + n >= limit
+    }
+    /// Takes every listed item.
+    pub fn take_all(&mut self, items: &[u32]) {
+        for &i in items {
+            self.take(i, -1);
+        }
+    }
     pub fn tele(&mut self, x: f32, y: f32, z: f32) {
         self.teleport = Some([x, y, z]);
     }
@@ -227,6 +266,27 @@ pub trait Quest: Send + Sync {
     }
 }
 
+/// Declares a quest struct with its NPC / monster / item lists; the body
+/// holds `on_event`, `on_talk`, `on_kill` and optional overrides.
+#[macro_export]
+macro_rules! quest {
+    ($ty:ident, $id:expr, $dir:expr, $title:expr,
+     start: [$($s:expr),* $(,)?], talk: [$($t:expr),* $(,)?], kills: $kills:expr, items: [$($i:expr),* $(,)?],
+     { $($body:tt)* }) => {
+        pub struct $ty;
+        impl $crate::quest::Quest for $ty {
+            fn id(&self) -> u32 { $id }
+            fn dir(&self) -> &'static str { $dir }
+            fn title(&self) -> &'static str { $title }
+            fn start_npcs(&self) -> Vec<u32> { vec![$($s),*] }
+            fn talk_npcs(&self) -> Vec<u32> { vec![$($t),*] }
+            fn kill_ids(&self) -> Vec<u32> { $kills }
+            fn quest_items(&self) -> Vec<u32> { vec![$($i),*] }
+            $($body)*
+        }
+    };
+}
+
 /// Helper for `can_start`: level range check returning the given page.
 pub fn level_range(p: &Player, min: u32, max: u32, page: &'static str) -> Result<(), &'static str> {
     if p.level() < min || p.level() > max { Err(page) } else { Ok(()) }
@@ -255,7 +315,14 @@ pub fn talk(q: &dyn Quest, log: &mut QuestLog, p: &mut Player, npc: u32) -> Stri
             return page.to_string();
         }
     }
-    q.on_talk(&mut Ctx { p, qs, npc })
+    let was_started = qs.is_started();
+    let page = q.on_talk(&mut Ctx { p, qs, npc });
+    if was_started && !qs.is_started() {
+        for item in q.quest_items() {
+            p.take(item, -1);
+        }
+    }
+    page
 }
 
 pub fn event(q: &dyn Quest, log: &mut QuestLog, p: &mut Player, npc: u32, ev: &str) -> Option<String> {
