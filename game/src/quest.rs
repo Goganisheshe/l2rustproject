@@ -108,6 +108,10 @@ pub struct Player<'a> {
     pub despawn_npc: bool,
     /// Where the monster being reported to `on_kill` died (Unreal units).
     pub kill_pos: [f32; 3],
+    /// Close the dialog window.
+    pub close_window: bool,
+    /// Tutorial page to open (from the tutorial quest's folder).
+    pub tutorial: Option<String>,
 }
 
 impl Player<'_> {

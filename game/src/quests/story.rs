@@ -153,3 +153,76 @@ quest!(Q10673, SAGA_OF_LEGEND, "Q10673_SagaOfLegend", "Saga of Legend",
         (qs.cond == 2 || qs.cond == 3).then(|| format!("Hunt monsters: {}/700", qs.get_int("KillCount")))
     }
 });
+
+// ---------------------------------------------------------------------------
+// Q00127 Fishing Specialist's Request
+// ---------------------------------------------------------------------------
+
+const PIERRE: u32 = 30013;
+const FERMA: u32 = 30015;
+const BAIKAL: u32 = 30016;
+const PIERRE_LETTER: u32 = 49510;
+const FISH_REPORT: u32 = 49504;
+const SEALED_BOTTLE: u32 = 49505;
+const FISHING_ROD_CHEST: u32 = 49507;
+
+quest!(Q00127, 127, "Q00127_FishingSpecialistsRequest", "Fishing Specialist's Request",
+    start: [PIERRE], talk: [PIERRE, FERMA, BAIKAL], kills: Vec::new(), items: [PIERRE_LETTER, FISH_REPORT, SEALED_BOTTLE], {
+    fn can_start(&self, p: &Player) -> Result<(), &'static str> {
+        if p.level() < 20 { Err("30013-00.htm") } else { Ok(()) }
+    }
+    fn on_event(&self, c: &mut Ctx, event: &str) -> Option<String> {
+        match event {
+            "30013-02.html" => {
+                c.qs.start_quest();
+                c.p.give(PIERRE_LETTER, 1);
+                page(event)
+            }
+            "teleport_to_ferma" => {
+                c.p.tele(105276.0, 162500.0, -3600.0);
+                None
+            }
+            _ => None,
+        }
+    }
+    fn on_talk(&self, c: &mut Ctx) -> String {
+        if c.qs.is_created() {
+            return if c.npc != PIERRE {
+                NO_QUEST
+            } else if c.p.level() < 20 {
+                "30013-00.htm"
+            } else {
+                "30013-01.htm"
+            }
+            .into();
+        }
+        if c.qs.is_completed() {
+            return ALREADY_COMPLETED.into();
+        }
+        match (c.npc, c.qs.cond) {
+            (PIERRE, 1 | 2) => "30013-03.html".into(),
+            (PIERRE, 3) => {
+                c.p.take(SEALED_BOTTLE, -1);
+                c.p.give(FISHING_ROD_CHEST, 1);
+                c.qs.exit_quest(false);
+                "30013-04.html".into()
+            }
+            (FERMA, 1) => {
+                c.p.take(PIERRE_LETTER, -1);
+                c.p.give(FISH_REPORT, 1);
+                c.qs.set_cond(2);
+                "30015-01.html".into()
+            }
+            (FERMA, 2) => "30015-02.html".into(),
+            (FERMA, 3) => "30015-03.html".into(),
+            (BAIKAL, 2) => {
+                c.p.take(FISH_REPORT, -1);
+                c.p.give(SEALED_BOTTLE, 1);
+                c.qs.set_cond(3);
+                "30016-01.html".into()
+            }
+            (BAIKAL, 3) => "30016-02.html".into(),
+            _ => NO_QUEST.into(),
+        }
+    }
+});

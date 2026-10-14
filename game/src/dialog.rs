@@ -110,12 +110,34 @@ pub struct TalkRequest(pub Option<Entity>);
 #[derive(Resource, Default)]
 struct Dialog {
     npc: Option<Entity>,
+    /// Tutorial window: open without an NPC.
+    tutorial: bool,
     npc_id: u32,
     npc_name: String,
     blocks: Vec<Block>,
     selected: usize,
     dirty: bool,
     pending: Option<String>,
+}
+
+impl Dialog {
+    fn is_open(&self) -> bool {
+        self.npc.is_some() || self.tutorial
+    }
+    fn close(&mut self) {
+        self.npc = None;
+        self.tutorial = false;
+        self.dirty = true;
+    }
+    /// Shows a tutorial page without an NPC.
+    fn open_tutorial(&mut self, src: &str) {
+        self.npc = None;
+        self.tutorial = true;
+        self.npc_id = 0;
+        self.blocks = html::parse(src);
+        self.selected = 0;
+        self.dirty = true;
+    }
 }
 
 #[derive(Component)]
@@ -150,7 +172,7 @@ impl Plugin for DialogPlugin {
             .add_systems(OnEnter(Phase::InWorld), spawn_overlays)
             .add_systems(
                 Update,
-                (debug_talk, approach_npc, dialog_input, run_bypass, quest_kills, render_dialog, screen_message, quest_tracker)
+                (start_tutorial, debug_talk, approach_npc, dialog_input, run_bypass, quest_kills, render_dialog, screen_message, quest_tracker)
                     .chain()
                     .run_if(in_state(Phase::InWorld)),
             );
@@ -173,6 +195,36 @@ fn spawn_overlays(mut commands: Commands) {
         TextColor(Color::srgb(0.95, 0.9, 0.7)),
         Node { position_type: PositionType::Absolute, top: Val::Px(140.0), left: Val::Px(10.0), max_width: Val::Px(360.0), ..default() },
     ));
+}
+
+/// New characters (level 6 or less, tutorial unfinished) get the tutorial
+/// a few seconds after entering the world, as on login on the server.
+fn start_tutorial(
+    time: Res<Time>,
+    mut dialog: ResMut<Dialog>,
+    qlog: Res<QuestLog>,
+    stats: Single<&HeroStats, With<Hero>>,
+    mut waited: Local<Option<f32>>,
+) {
+    let Some(t) = waited.as_mut() else {
+        *waited = Some(0.0);
+        return;
+    };
+    if *t < 0.0 {
+        return;
+    }
+    *t += time.delta_secs();
+    if *t < 5.0 {
+        return;
+    }
+    *t = -1.0;
+    let memo = qlog.states.get(&crate::quests::tutorial::TUTORIAL).map_or(0, |q| q.memo());
+    let first = crate::quests::tutorial::start_page(stats.template.class_id).is_some();
+    if stats.level <= 6 && memo < 4 && first && std::env::var_os("L2_NO_TUTORIAL").is_none() && !dialog.is_open() {
+        dialog.tutorial = true;
+        dialog.npc_id = 0;
+        dialog.pending = Some("Script Q00255_Tutorial start_newbie_tutorial".into());
+    }
 }
 
 /// Tests: `L2_TALK=<npc id>` walks to that NPC and talks; `L2_BYPASS` then
@@ -247,6 +299,7 @@ fn approach_npc(
         a.play(&hero.clips("wait", "Wait").each_ref().map(String::as_str), true);
     }
     dialog.npc = Some(e);
+    dialog.tutorial = false;
     dialog.npc_id = npc.template.id;
     dialog.npc_name = npc.template.name.clone();
     dialog.pending = Some("<first>".into());
@@ -261,11 +314,12 @@ fn dialog_input(
     hero: Single<&Transform, With<Hero>>,
     npcs: Query<&Transform, (With<Npc>, Without<Hero>)>,
 ) {
-    let Some(npc) = dialog.npc else { return };
-    let far = npcs.get(npc).map_or(true, |t| t.translation.distance(hero.translation) > 8.0);
+    if !dialog.is_open() {
+        return;
+    }
+    let far = dialog.npc.is_some_and(|npc| npcs.get(npc).map_or(true, |t| t.translation.distance(hero.translation) > 8.0));
     if far || keys.just_pressed(KeyCode::Escape) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::East)) {
-        dialog.npc = None;
-        dialog.dirty = true;
+        dialog.close();
         return;
     }
     let link_ids: Vec<usize> =
@@ -303,7 +357,9 @@ fn run_bypass(
     hero: Single<(&Hero, &mut Transform, &mut HeroStats, &mut Inventory)>,
 ) {
     let Some(cmd) = dialog.pending.take() else { return };
-    let Some(_) = dialog.npc else { return };
+    if !dialog.is_open() {
+        return;
+    }
     let (hero, mut tr, mut stats, mut inv) = hero.into_inner();
     let npc = dialog.npc_id;
     let mut p = Player {
@@ -319,9 +375,12 @@ fn run_bypass(
         spawns: Vec::new(),
         despawn_npc: false,
         kill_pos: [0.0; 3],
+        close_window: false,
+        tutorial: None,
     };
     let page = execute(&cmd, npc, &pages, &quests, &mut qlog, &mut p);
     let (teleport, msg, class_change) = (p.teleport, p.screen.take(), p.class_change);
+    let (close, tutorial) = (p.close_window, p.tutorial.take());
     spawn_req.0.append(&mut p.spawns);
     if p.despawn_npc {
         if let Some(e) = dialog.npc.take() {
@@ -340,8 +399,15 @@ fn run_bypass(
         let pos = ue_to_bevy(at);
         tr.translation = pos;
         streamer.request_around(pos);
-        dialog.npc = None;
-        dialog.dirty = true;
+        dialog.close();
+        return;
+    }
+    if close {
+        dialog.close();
+        return;
+    }
+    if let Some(src) = tutorial.and_then(|t| pages.script("Q00255_Tutorial", &t)) {
+        dialog.open_tutorial(&src);
         return;
     }
     match page {
@@ -481,6 +547,8 @@ fn quest_kills(
     mut log: ResMut<Log>,
     mut screen: ResMut<ScreenMsg>,
     mut spawn_req: ResMut<crate::rpg::SpawnRequests>,
+    pages: Res<Pages>,
+    mut dialog: ResMut<Dialog>,
     hero: Single<(&Hero, &mut HeroStats, &mut Inventory)>,
     mut npcs: Query<(&mut Npc, &Transform)>,
 ) {
@@ -498,6 +566,8 @@ fn quest_kills(
         spawns: Vec::new(),
         despawn_npc: false,
         kill_pos: [0.0; 3],
+        close_window: false,
+        tutorial: None,
     };
     for (mut npc, tr) in &mut npcs {
         if npc.state != NpcState::Dead || npc.quest_seen {
@@ -508,6 +578,9 @@ fn quest_kills(
         quest::kill(&quests, &mut qlog, &mut p, npc.template.id);
     }
     spawn_req.0.append(&mut p.spawns);
+    if let Some(src) = p.tutorial.take().and_then(|t| pages.script("Q00255_Tutorial", &t)) {
+        dialog.open_tutorial(&src);
+    }
     if let Some(m) = p.screen.take() {
         screen.text = m;
         screen.timer = 6.0;
@@ -526,7 +599,7 @@ fn render_dialog(
     for e in &roots {
         commands.entity(e).despawn();
     }
-    if dialog.npc.is_none() {
+    if !dialog.is_open() {
         return;
     }
     let selected = dialog.selected;

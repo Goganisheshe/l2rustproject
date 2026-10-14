@@ -247,7 +247,13 @@ pub fn load(root: &Path) -> Datapack {
                     walk_speed: g(speed.and_then(|s| child(s, "walk")), "ground", 40.0),
                     exp: acquire.and_then(|a| attr(a, "exp")).unwrap_or(0),
                     sp: acquire.and_then(|a| attr(a, "sp")).unwrap_or(0),
-                    aggro_range: g(child(n, "ai"), "aggroRange", 0.0),
+                    // `isAggressive="false"` keeps the range for helping
+                    // allies only; unspecified means aggressive.
+                    aggro_range: if child(n, "ai").and_then(|a| a.attribute("isAggressive")) == Some("false") {
+                        0.0
+                    } else {
+                        g(child(n, "ai"), "aggroRange", 0.0)
+                    },
                     radius: g(collision.and_then(|c| child(c, "radius")), "normal", 10.0),
                     height: g(collision.and_then(|c| child(c, "height")), "normal", 20.0),
                     skills: child(n, "skillList")

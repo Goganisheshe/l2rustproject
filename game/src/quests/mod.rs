@@ -11,12 +11,13 @@ mod farmland;
 mod newbie;
 mod relics;
 pub mod story;
+pub mod tutorial;
 mod newbie_guide;
 
 use crate::quest::Quest;
 
 pub fn all() -> Vec<Box<dyn Quest>> {
-    let mut v: Vec<Box<dyn Quest>> = vec![Box::new(newbie_guide::NewbieGuide), Box::new(baium::Baium)];
+    let mut v: Vec<Box<dyn Quest>> = vec![Box::new(newbie_guide::NewbieGuide), Box::new(baium::Baium), Box::new(tutorial::Tutorial)];
     v.push(Box::new(bounty::Q00300));
     v.push(Box::new(bounty::Q00326));
     v.push(Box::new(bounty::Q00328));
@@ -34,6 +35,7 @@ pub fn all() -> Vec<Box<dyn Quest>> {
     v.push(Box::new(relics::Q00344));
     v.push(Box::new(cards::Q00662));
     v.push(Box::new(relics::Q00500));
+    v.push(Box::new(story::Q00127));
     v.push(Box::new(story::Q10866));
     v.push(Box::new(story::Q10673));
     v.extend(abyss::WINGS.iter().map(|q| Box::new(q) as Box<dyn Quest>));
