@@ -41,6 +41,7 @@ pub struct HeroSkills {
     cast: Option<Cast>,
     last_level: u32,
     last_sp: u64,
+    last_class: u32,
 }
 
 struct Cast {
@@ -58,6 +59,7 @@ struct Cast {
 fn learn_skills(
     mut commands: Commands,
     book: Res<SkillBook>,
+    dp: Res<crate::datapack::Datapack>,
     mut log: ResMut<Log>,
     hero: Single<(Entity, &mut HeroStats, Option<&mut HeroSkills>), With<Hero>>,
 ) {
@@ -66,14 +68,15 @@ fn learn_skills(
         commands.entity(e).insert(HeroSkills::default());
         return;
     };
-    if skills.last_level == stats.level && skills.last_sp == stats.sp {
+    let class_id = stats.template.class_id;
+    if skills.last_level == stats.level && skills.last_sp == stats.sp && skills.last_class == class_id {
         return;
     }
-    let Some(tree) = book.trees.get(template_for_stats(&stats)) else { return };
+    let tree = book.class_tree(class_id, &dp);
     let mut changed = true;
     while changed {
         changed = false;
-        for entry in tree {
+        for entry in &tree {
             let have = skills.learned.get(&entry.skill).copied().unwrap_or(0);
             if entry.get_level > stats.level || entry.level != have + 1 || stats.sp < entry.sp {
                 continue;
@@ -90,6 +93,7 @@ fn learn_skills(
     }
     skills.last_level = stats.level;
     skills.last_sp = stats.sp;
+    skills.last_class = class_id;
 }
 
 fn cast_input(

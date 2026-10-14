@@ -93,6 +93,32 @@ pub struct Datapack {
     pub classes: HashMap<String, PlayerTemplate>,
     /// Total experience needed to reach each level (index = level).
     pub exp: Vec<u64>,
+    /// Every class template (base stats) by class id.
+    pub templates_by_id: HashMap<u32, PlayerTemplate>,
+    /// classList.xml: class id -> (name, parent class).
+    pub class_list: HashMap<u32, (String, Option<u32>)>,
+}
+
+impl Datapack {
+    /// Classes one transfer away from `class_id`, sorted by id.
+    pub fn next_classes(&self, class_id: u32) -> Vec<u32> {
+        let mut v: Vec<u32> = self.class_list.iter().filter(|(_, (_, p))| *p == Some(class_id)).map(|(id, _)| *id).collect();
+        v.sort();
+        v
+    }
+    /// Number of transfers from the starting class.
+    pub fn class_depth(&self, class_id: u32) -> u32 {
+        let mut d = 0;
+        let mut c = class_id;
+        while let Some((_, Some(p))) = self.class_list.get(&c) {
+            d += 1;
+            c = *p;
+        }
+        d
+    }
+    pub fn class_name(&self, class_id: u32) -> &str {
+        self.class_list.get(&class_id).map_or("?", |c| c.0.as_str())
+    }
 }
 
 impl Datapack {
@@ -263,10 +289,9 @@ pub fn load(root: &Path) -> Datapack {
         dp.spawns_by_tile.entry(tile).or_default().push(i);
     }
 
-    // Starting class templates.
+    // Class templates (all professions).
     let mut files = Vec::new();
-    xml_files(&root.join("stats/players/templates/StartingClass"), &mut files);
-    files.push(root.join("stats/players/templates/Kamael/KamaelSoldier.xml"));
+    xml_files(&root.join("stats/players/templates"), &mut files);
     for f in files {
         let Ok(src) = std::fs::read_to_string(&f) else { continue };
         let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
@@ -313,7 +338,16 @@ pub fn load(root: &Path) -> Datapack {
             }
         }
         let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        dp.templates_by_id.insert(t.class_id, t.clone());
         dp.classes.insert(stem, t);
+    }
+    if let Ok(src) = std::fs::read_to_string(root.join("stats/players/classList.xml")) {
+        if let Ok(doc) = roxmltree::Document::parse(&src) {
+            for c in doc.root_element().children().filter(|c| c.has_tag_name("class")) {
+                let Some(id) = attr::<u32>(c, "classId") else { continue };
+                dp.class_list.insert(id, (c.attribute("name").unwrap_or("").to_string(), attr(c, "parentClassId")));
+            }
+        }
     }
 
     // Experience table.
@@ -464,6 +498,21 @@ pub struct SkillBook {
     pub skills: HashMap<u32, ServerSkill>,
     /// Class skill trees by template file stem (`HumanFighter`...).
     pub trees: HashMap<String, Vec<TreeEntry>>,
+    /// Class skill trees by class id (only that class's own entries).
+    pub trees_by_id: HashMap<u32, Vec<TreeEntry>>,
+}
+
+impl SkillBook {
+    /// Skills a class can learn: its own tree plus every parent class's.
+    pub fn class_tree(&self, class_id: u32, dp: &Datapack) -> Vec<TreeEntry> {
+        let mut out = Vec::new();
+        let mut c = Some(class_id);
+        while let Some(id) = c {
+            out.extend(self.trees_by_id.get(&id).into_iter().flatten().cloned());
+            c = dp.class_list.get(&id).and_then(|x| x.1);
+        }
+        out
+    }
 }
 
 pub fn load_skills(root: &Path) -> SkillBook {
@@ -512,12 +561,14 @@ pub fn load_skills(root: &Path) -> SkillBook {
         }
     }
     let mut files = Vec::new();
-    xml_files(&root.join("stats/players/skillTrees/StartingClass"), &mut files);
-    files.push(root.join("stats/players/skillTrees/Kamael/KamaelSoldier.xml"));
+    for dir in ["StartingClass", "1stClass", "2ndClass", "3rdClass", "Kamael"] {
+        xml_files(&root.join("stats/players/skillTrees").join(dir), &mut files);
+    }
     for f in files {
         let Ok(src) = std::fs::read_to_string(&f) else { continue };
         let Ok(doc) = roxmltree::Document::parse(&src) else { continue };
-        let entries = doc
+        let class_id = doc.descendants().find(|c| c.has_tag_name("skillTree")).and_then(|t| attr::<u32>(t, "classId"));
+        let entries: Vec<TreeEntry> = doc
             .descendants()
             .filter(|c| c.has_tag_name("skill"))
             .filter_map(|c| {
@@ -532,6 +583,9 @@ pub fn load_skills(root: &Path) -> SkillBook {
             .filter(|e| e.skill != 1372)
             .collect();
         let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(id) = class_id {
+            book.trees_by_id.insert(id, entries.clone());
+        }
         book.trees.insert(stem, entries);
     }
     book

@@ -298,6 +298,15 @@ fn enter_world(
     let mut stats = HeroStats::new(template);
     stats.respawn = pos;
     stats.class_key = template_for(class.prefix).to_string();
+    // L2_LEVEL=<n> starts at that level (tests).
+    if let Some(l) = std::env::var("L2_LEVEL").ok().and_then(|v| v.parse::<u32>().ok()) {
+        stats.exp = dp.exp.get(l as usize).copied().unwrap_or(0);
+        stats.level = dp.level_for(stats.exp);
+        stats.sp = 1_000_000;
+        stats.recalc();
+        stats.hp = stats.max_hp;
+        stats.mp = stats.max_mp;
+    }
     commands.entity(hero).insert((Hero { actor, class: c.index, stance: "1HS" }, stats));
     spawn_hud(&mut commands);
     commands.spawn((
@@ -437,11 +446,19 @@ fn stream_around(mut streamer: ResMut<TileStreamer>, hero: Single<&Transform, Wi
     streamer.request_around(hero.translation);
 }
 
-fn hud(c: Res<Creation>, hero: Single<&Transform, With<Hero>>, mut text: Single<&mut Text, With<HudText>>) {
-    let ue = bevy_to_ue(hero.translation);
+fn hud(
+    dp: Res<Datapack>,
+    hero: Single<(&Transform, &crate::rpg::HeroStats), With<Hero>>,
+    mut text: Single<&mut Text, With<HudText>>,
+) {
+    let (tr, stats) = hero.into_inner();
+    let ue = bevy_to_ue(tr.translation);
     let (tx, ty) = tile_of(ue[0], ue[1]);
     text.0 = format!(
         "{}   x {:.0}  y {:.0}  z {:.0}   tile {tx}_{ty}",
-        CLASSES[c.index].name, ue[0], ue[1], ue[2]
+        dp.class_name(stats.template.class_id),
+        ue[0],
+        ue[1],
+        ue[2]
     );
 }

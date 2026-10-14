@@ -295,6 +295,7 @@ fn run_bypass(
     mut log: ResMut<Log>,
     mut screen: ResMut<ScreenMsg>,
     mut streamer: ResMut<TileStreamer>,
+    mut class_ui: ResMut<crate::classchange::ClassChangeUi>,
     hero: Single<(&Hero, &mut Transform, &mut HeroStats, &mut Inventory)>,
 ) {
     let Some(cmd) = dialog.pending.take() else { return };
@@ -315,7 +316,7 @@ fn run_bypass(
     let page = execute(&cmd, npc, &pages, &quests, &mut qlog, &mut p);
     let (teleport, msg, class_change) = (p.teleport, p.screen.take(), p.class_change);
     if class_change {
-        log.push("Class transfer is available (coming soon).");
+        class_ui.open = true;
     }
     if let Some(m) = msg {
         screen.text = m;

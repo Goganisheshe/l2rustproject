@@ -3,6 +3,7 @@
 mod input;
 mod items;
 mod character;
+mod classchange;
 mod collision;
 mod datapack;
 mod dialog;
@@ -43,7 +44,7 @@ fn main() {
     } else if std::env::var_os("L2_SURVIVOR").is_some() {
         app.add_plugins(survivor::SurvivorPlugin);
     } else {
-        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin));
+        app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin));
     }
     app.run();
 }
