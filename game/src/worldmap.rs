@@ -1,6 +1,8 @@
 //! World map (M) and radar (top right), drawn with the client's own map
 //! art: the nine `Minimap.worldmapN` textures of `l2font-ru.utx` form a
 //! 3072 px square, mapped to the world at 200 Unreal units per pixel.
+//! With the client interface loaded, M opens its MinimapWnd: the map around
+//! the hero inside the original frame, zoomed with the mouse wheel.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
@@ -35,6 +37,16 @@ struct WorldMapMarker;
 #[derive(Component)]
 struct RadarImage;
 
+/// The map image inside the client's MinimapWnd, and its zoom.
+#[derive(Component)]
+struct FramedMap {
+    view: Vec2,
+    zoom: f32,
+}
+
+#[derive(Component)]
+struct LocationText;
+
 pub struct WorldMapPlugin;
 
 impl Plugin for WorldMapPlugin {
@@ -44,7 +56,7 @@ impl Plugin for WorldMapPlugin {
     }
 }
 
-fn build_map(mut commands: Commands, mut lib: ResMut<L2Library>, mut images: ResMut<Assets<Image>>) {
+fn build_map(mut commands: Commands, mut lib: ResMut<L2Library>, mut images: ResMut<Assets<Image>>, iface: Option<Res<crate::l2ui::Interface>>) {
     let Some(l) = lib.lib.as_mut() else { return };
     let (cw, ch) = (CROP.2, CROP.3);
     let mut data = vec![0u8; (cw * ch * 4) as usize];
@@ -82,6 +94,11 @@ fn build_map(mut commands: Commands, mut lib: ResMut<L2Library>, mut images: Res
         RenderAssetUsages::RENDER_WORLD,
     );
     let image = images.add(image);
+    // The client has no always-on radar: its map is the MinimapWnd (M).
+    if iface.is_some() {
+        commands.insert_resource(MapArt { image });
+        return;
+    }
     // Radar: a clipped window onto the scaled map, centred on the hero.
     commands
         .spawn((
@@ -140,7 +157,11 @@ fn world_map(
     art: Res<MapArt>,
     hero: Single<&Transform, With<Hero>>,
     roots: Query<Entity, With<WorldMapRoot>>,
-    mut marker: Query<&mut Node, With<WorldMapMarker>>,
+    mut marker: Query<&mut Node, (With<WorldMapMarker>, Without<FramedMap>)>,
+    mut framed: Query<(&mut FramedMap, &mut Node), Without<WorldMapMarker>>,
+    mut locs: Query<&mut Text, With<LocationText>>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut ua: crate::l2ui::UiAssets,
     mut env_opened: Local<bool>,
 ) {
     let mut toggle = keys.just_pressed(KeyCode::KeyM) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::LeftThumb));
@@ -157,7 +178,49 @@ fn world_map(
     }
     let (cw, ch) = (CROP.2 as f32, CROP.3 as f32);
     let p = map_px(bevy_to_ue(hero.translation));
+    let ue = bevy_to_ue(hero.translation);
     if toggle && !open {
+        let screen = ua.screen();
+        if let Some(i) = ua.iface.as_deref() {
+            let hide = |n: &str| {
+                n.starts_with("ServerInfo")
+                    || matches!(
+                        n,
+                        "MapSelectTab" | "TabBg_Line" | "GraciaMap" | "AdenMap" | "ComboBoxShadow" | "FloorComboBox" | "OpenGuideWnd" | "PartyLocButton" | "ExpandButton" | "btnReduce" | "texMoon" | "texSun" | "txtGameTime" | "txtColonSSQ"
+                    )
+            };
+            if let Some(root) = crate::l2ui::spawn_window(&mut commands, i, &i.0, "MinimapWnd", screen, &hide, &mut ua.tex, &mut ua.lib, &mut ua.images) {
+                commands.entity(root).insert(WorldMapRoot);
+                let (pos, size) = crate::l2ui::ctrl_rect(&i.0, "MinimapWnd", "Minimap", screen).unwrap_or((Vec2::new(6.0, 58.0), Vec2::new(411.0, 413.0)));
+                let zoom = 1.5;
+                commands
+                    .spawn((
+                        Node { position_type: PositionType::Absolute, left: Val::Px(pos.x), top: Val::Px(pos.y), width: Val::Px(size.x), height: Val::Px(size.y), overflow: Overflow::clip(), ..default() },
+                        BackgroundColor(Color::srgb(0.05, 0.05, 0.05)),
+                        ChildOf(root),
+                    ))
+                    .with_children(|m| {
+                        m.spawn((FramedMap { view: size, zoom }, ImageNode::new(art.image.clone()), Node { position_type: PositionType::Absolute, ..default() })).with_children(|img| {
+                            img.spawn((
+                                WorldMapMarker,
+                                Node { position_type: PositionType::Absolute, width: Val::Px(8.0), height: Val::Px(8.0), margin: UiRect::all(Val::Px(-4.0)), ..default() },
+                                BackgroundColor(Color::srgb(1.0, 0.25, 0.2)),
+                            ));
+                        });
+                    });
+                if let Some((lp, _)) = crate::l2ui::ctrl_rect(&i.0, "MinimapWnd", "txtVarCurLoc", screen) {
+                    commands.spawn((
+                        LocationText,
+                        Text::new(""),
+                        TextFont { font_size: FontSize::Px(11.0), ..default() },
+                        TextColor(Color::srgb(0.9, 0.85, 0.7)),
+                        Node { position_type: PositionType::Absolute, left: Val::Px(lp.x + 4.0), top: Val::Px(lp.y), ..default() },
+                        ChildOf(root),
+                    ));
+                }
+                return;
+            }
+        }
         commands
             .spawn((
                 WorldMapRoot,
@@ -197,5 +260,23 @@ fn world_map(
     for mut n in &mut marker {
         n.left = Val::Percent(p.x / cw * 100.0);
         n.top = Val::Percent(p.y / ch * 100.0);
+    }
+    let scroll: f32 = wheel.read().map(|w| w.y.signum()).sum();
+    for (mut f, mut n) in &mut framed {
+        if scroll != 0.0 {
+            f.zoom = (f.zoom * 1.25f32.powf(scroll)).clamp(0.25, 4.0);
+        }
+        n.width = Val::Px(cw * f.zoom);
+        n.height = Val::Px(ch * f.zoom);
+        // Centred on the hero, but the art keeps filling the frame.
+        let clamp = |v: f32, view: f32, size: f32| if size <= view { (view - size) / 2.0 } else { v.clamp(view - size, 0.0) };
+        n.left = Val::Px(clamp(f.view.x / 2.0 - p.x * f.zoom, f.view.x, cw * f.zoom));
+        n.top = Val::Px(clamp(f.view.y / 2.0 - p.y * f.zoom, f.view.y, ch * f.zoom));
+    }
+    for mut t in &mut locs {
+        let s = format!("{:.0}, {:.0}, {:.0}", ue[0], ue[1], ue[2]);
+        if t.0 != s {
+            t.0 = s;
+        }
     }
 }
