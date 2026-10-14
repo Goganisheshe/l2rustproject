@@ -5,6 +5,7 @@ mod baium;
 mod bounty;
 mod bounty2;
 mod newbie;
+mod relics;
 pub mod story;
 mod newbie_guide;
 
@@ -24,6 +25,8 @@ pub fn all() -> Vec<Box<dyn Quest>> {
     v.push(Box::new(bounty2::Q00360));
     v.push(Box::new(bounty2::Q00369));
     v.push(Box::new(bounty2::Q00370));
+    v.push(Box::new(relics::Q00344));
+    v.push(Box::new(relics::Q00500));
     v.push(Box::new(story::Q10866));
     v.push(Box::new(story::Q10673));
     v.extend(adventure::ADVENTURES.iter().map(|q| Box::new(q) as Box<dyn Quest>));
