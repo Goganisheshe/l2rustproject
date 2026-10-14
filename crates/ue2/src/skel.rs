@@ -349,6 +349,10 @@ fn build_from_source(
             v.push((w, b));
         }
     }
+    if std::env::var_os("L2_SKEL_DEBUG").is_some() {
+        let empty = per_point.iter().filter(|v| v.is_empty()).count();
+        eprintln!("source mesh: {} points, {} without influences, {} influences", points.len(), empty, influences.len());
+    }
     let packed: Vec<_> = per_point.iter_mut().map(pack_weights).collect();
 
     for &(p, uv) in wedges {
@@ -400,6 +404,12 @@ fn build_from_lod(mesh: &mut SkeletalMesh, lod: &Lod0) -> Result<(), Error> {
             .filter(|&k| lw.bones[k] != 255 && lw.w[k] > 1e-6)
             .map(|k| (lw.w[k], map.get(lw.bones[k] as usize).copied().unwrap_or(0).max(0) as u16))
             .collect();
+        if std::env::var_os("L2_SKEL_DEBUG").is_some() {
+            let miss = (0..4).any(|k| lw.bones[k] != 255 && lw.w[k] > 1e-6 && map.get(lw.bones[k] as usize).is_none());
+            if miss || list.is_empty() {
+                eprintln!("wedge {i}: section {} bones {:?} w {:?} map len {}", wedge_section[i] as isize, lw.bones, lw.w, map.len());
+            }
+        }
         let (j, w) = pack_weights(&mut list);
         mesh.joints.push(j);
         mesh.weights.push(w);
@@ -413,6 +423,15 @@ fn build_from_lod(mesh: &mut SkeletalMesh, lod: &Lod0) -> Result<(), Error> {
         mesh.sections.push(SkinSection { material: s.material as usize, first_index: first, num_indices: idx.len() as u32 });
     }
 
+    if std::env::var_os("L2_SKEL_DEBUG").is_some() {
+        for s in &lod.rigid {
+            eprintln!("rigid section: bone {} faces {} map {:?}", s.bone, s.num_faces, s.bone_map);
+        }
+        for s in &lod.soft {
+            eprintln!("soft section: bone {} faces {} map len {}", s.bone, s.num_faces, s.bone_map.len());
+        }
+        eprintln!("lineage wedges {}, rigid verts {}", lod.lineage_wedges.len(), lod.rigid_verts.len());
+    }
     // Rigid sections: every vertex follows one bone.
     let base = mesh.positions.len() as u32;
     let mut rigid_bone = vec![0u16; lod.rigid_verts.len()];

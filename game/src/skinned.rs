@@ -29,6 +29,21 @@ fn quat_mode() -> u32 {
     std::env::var("L2_QUAT_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
+/// Bone lookup keys. Some Lineage skeletons repeat a name (e.g. the right
+/// hand has a second "Bip01_L_Finger01"), so the n-th occurrence of a name
+/// gets its own key and matches the n-th occurrence elsewhere.
+fn bone_keys<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    names
+        .map(|n| {
+            let lower = n.to_ascii_lowercase();
+            let k = seen.entry(lower.clone()).or_insert(0);
+            *k += 1;
+            format!("{lower}#{k}")
+        })
+        .collect()
+}
+
 fn ue_pos(p: [f32; 3]) -> Vec3 {
     Vec3::new(p[0], p[2], p[1]) * UU_TO_M
 }
@@ -72,8 +87,15 @@ pub struct Model {
 }
 
 impl Model {
+    /// Finds a clip by exact name, or by prefix for race-suffixed player
+    /// clips like `run_1HS_MFighter`.
     pub fn clip(&self, name: &str) -> Option<usize> {
-        self.clips.iter().position(|c| c.name.eq_ignore_ascii_case(name))
+        let lower = name.to_ascii_lowercase();
+        let prefix = format!("{lower}_");
+        self.clips
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+            .or_else(|| self.clips.iter().position(|c| c.name.to_ascii_lowercase().starts_with(&prefix)))
     }
 }
 
@@ -141,33 +163,64 @@ fn build_model(
     images: &mut Assets<Image>,
     bindposes: &mut Assets<SkinnedMeshInverseBindposes>,
 ) -> Option<Model> {
+    // `mesh_name` may list several parts joined by '+', e.g. a face, hair and
+    // armor pieces of a player character. They share one skeleton, merged by
+    // bone name; the first part provides the actor transform. A part can force
+    // its material with `mesh@package/material`: player faces and hair get
+    // theirs assigned at runtime by the client, so the mesh has none.
     let l = lib.lib.as_mut()?;
-    let h = l.find(package, mesh_name)?;
-    let sm = match ue2::skel::read_skeletal_mesh(&h.package, h.export) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!("{package}:{mesh_name}: {e}");
-            return None;
+    let mut loaded = Vec::new();
+    let mut overrides: Vec<Option<(String, String)>> = Vec::new();
+    for spec in mesh_name.split('+').filter(|p| !p.is_empty()) {
+        let (part, ovr) = match spec.split_once('@') {
+            Some((p, m)) => (p, m.split_once('/').map(|(a, b)| (a.to_string(), b.to_string()))),
+            None => (spec, None),
+        };
+        let Some(h) = l.find(package, part) else {
+            warn!("{package}:{part} not found");
+            continue;
+        };
+        match ue2::skel::read_skeletal_mesh(&h.package, h.export) {
+            Ok(m) => {
+                loaded.push((h, m));
+                overrides.push(ovr);
+            }
+            Err(e) => warn!("{package}:{part}: {e}"),
         }
-    };
+    }
+    let (h, sm) = loaded.first()?;
+    let (h, sm) = (h.clone(), sm.clone());
     let mode = quat_mode();
 
-    // Rest pose in Bevy space.
-    let rest: Vec<(usize, Vec3, Quat)> = sm
-        .bones
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (if i == 0 { 0 } else { b.parent }, ue_pos(b.translation), ue_quat(b.rotation, i == 0, mode)))
-        .collect();
+    // Merged skeleton: (name, parent, local translation, local rotation).
+    let mut bones: Vec<(String, usize, Vec3, Quat)> = Vec::new();
+    let mut bone_index: HashMap<String, usize> = HashMap::new();
+    let mut remaps: Vec<Vec<u16>> = Vec::new();
+    for (_, m) in &loaded {
+        let mut remap = Vec::with_capacity(m.bones.len());
+        let keys = bone_keys(m.bones.iter().map(|b| b.name.as_str()));
+        for (i, (b, key)) in m.bones.iter().zip(keys).enumerate() {
+            let idx = match bone_index.get(&key) {
+                Some(&j) => j,
+                None => {
+                    let parent = if i == 0 { 0 } else { remap.get(b.parent).copied().unwrap_or(0) as usize };
+                    let j = bones.len();
+                    bones.push((b.name.clone(), parent, ue_pos(b.translation), ue_quat(b.rotation, j == 0, mode)));
+                    bone_index.insert(key, j);
+                    j
+                }
+            };
+            remap.push(idx as u16);
+        }
+        remaps.push(remap);
+    }
+    let rest: Vec<(usize, Vec3, Quat)> = bones.iter().map(|b| (b.1, b.2, b.3)).collect();
     let mut global: Vec<Mat4> = Vec::with_capacity(rest.len());
     for (i, (parent, t, r)) in rest.iter().enumerate() {
         let local = Mat4::from_rotation_translation(*r, *t);
         global.push(if i == 0 { local } else { global[*parent] * local });
     }
     let inverse: Vec<Mat4> = global.iter().map(|m| m.inverse()).collect();
-
-    let positions: Vec<[f32; 3]> = sm.positions.iter().map(|&p| ue_pos(p).to_array()).collect();
-    let normals: Vec<[f32; 3]> = sm.normals.iter().map(|&n| Vec3::new(n[0], n[2], n[1]).to_array()).collect();
 
     // Actor transform: RotOrigin yaw and MeshOrigin. Unreal yaw turns +X toward +Y,
     // which after the Y/Z mirror is a negative turn about Bevy's Y axis.
@@ -179,35 +232,54 @@ fn build_model(
     let rot = Quat::from_rotation_y(yaw);
     let origin = ue_pos(sm.origin);
     let mut actor = Transform { translation: rot * (scale * -origin), rotation: rot, scale };
-    let min_y = positions
+    let ys: Vec<f32> = loaded
         .iter()
-        .map(|p| actor.transform_point(Vec3::from_array(*p)).y)
-        .fold(f32::INFINITY, f32::min);
-    let max_y = positions
-        .iter()
-        .map(|p| actor.transform_point(Vec3::from_array(*p)).y)
-        .fold(f32::NEG_INFINITY, f32::max);
+        .flat_map(|(_, m)| m.positions.iter())
+        .map(|&p| actor.transform_point(ue_pos(p)).y)
+        .collect();
+    let min_y = ys.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_y = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     if min_y.is_finite() {
         actor.translation.y -= min_y;
     }
     let height = max_y - min_y;
 
     let mut parts = Vec::new();
-    let pkg = h.package.clone();
-    for s in &sm.sections {
-        let range = s.first_index as usize..(s.first_index + s.num_indices) as usize;
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sm.uvs.clone());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(sm.joints.clone()));
-        mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, sm.weights.clone());
-        mesh.insert_indices(Indices::U32(sm.indices[range].to_vec()));
-        let Ok(mesh) = mesh.with_generated_skinned_mesh_bounds() else { continue };
-        let mat_ref = sm.materials.get(s.material).copied().unwrap_or_default();
-        let material = lib.material(&pkg, mat_ref, materials, images);
-        parts.push((meshes.add(mesh), material));
+    let mut total_verts = 0;
+    for (((ph, m), remap), ovr) in loaded.iter().zip(&remaps).zip(&overrides) {
+        let forced = ovr.as_ref().and_then(|(p, o)| {
+            let mat = lib.material_by_name(p, o, materials, images);
+            if mat.is_none() {
+                warn!("material override {p}/{o} not found");
+            }
+            mat
+        });
+        total_verts += m.positions.len();
+        let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| ue_pos(p).to_array()).collect();
+        let normals: Vec<[f32; 3]> = m.normals.iter().map(|&n| Vec3::new(n[0], n[2], n[1]).to_array()).collect();
+        let joints: Vec<[u16; 4]> =
+            m.joints.iter().map(|j| j.map(|b| remap.get(b as usize).copied().unwrap_or(0))).collect();
+        for s in &m.sections {
+            let range = s.first_index as usize..(s.first_index + s.num_indices) as usize;
+            let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, m.uvs.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(joints.clone()));
+            mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, m.weights.clone());
+            mesh.insert_indices(Indices::U32(m.indices[range].to_vec()));
+            let Ok(mesh) = mesh.with_generated_skinned_mesh_bounds() else { continue };
+            let material = match &forced {
+                Some(f) => f.clone(),
+                None => {
+                    let mat_ref = m.materials.get(s.material).copied().unwrap_or_default();
+                    lib.material(&ph.package, mat_ref, materials, images)
+                }
+            };
+            parts.push((meshes.add(mesh), material));
+        }
     }
+    let pkg = h.package.clone();
 
     // Animation: explicit override, else the mesh's own reference.
     let l = lib.lib.as_mut()?;
@@ -220,9 +292,9 @@ fn build_model(
         match ue2::anim::read_animation(&ah.package, ah.export) {
             Ok(a) => {
                 let by_name: HashMap<String, usize> =
-                    a.bones.iter().enumerate().map(|(i, n)| (n.to_ascii_lowercase(), i)).collect();
+                    bone_keys(a.bones.iter().map(String::as_str)).into_iter().enumerate().map(|(i, k)| (k, i)).collect();
                 let map: Vec<Option<usize>> =
-                    sm.bones.iter().map(|b| by_name.get(&b.name.to_ascii_lowercase()).copied()).collect();
+                    bone_keys(bones.iter().map(|b| b.0.as_str())).iter().map(|k| by_name.get(k).copied()).collect();
                 for seq in &a.sequences {
                     let tracks = map
                         .iter()
@@ -244,8 +316,8 @@ fn build_model(
     }
     info!(
         "model {package}:{mesh_name}: {} verts, {} bones, {} clips, {height:.2} m tall",
-        sm.positions.len(),
-        sm.bones.len(),
+        total_verts,
+        bones.len(),
         clips.len()
     );
 

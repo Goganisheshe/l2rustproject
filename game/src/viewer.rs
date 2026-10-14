@@ -31,8 +31,20 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
+    // `class:<prefix>[:clip]` shows an assembled player character.
     let parts: Vec<&str> = spec.0.split(':').collect();
-    let (pkg, mesh, clip) = (parts[0], parts.get(1).copied().unwrap_or(""), parts.get(2).copied().unwrap_or("wait"));
+    let (pkg, mesh, clip) = match (parts[0], parts.get(1).and_then(|k| crate::character::find_class(k))) {
+        ("class", Some(i)) => {
+            let c = &crate::character::CLASSES[i];
+            (c.package.to_string(), crate::character::part_spec(&mut lib, c), parts.get(2).copied().unwrap_or("wait_1HS"))
+        }
+        _ => (
+            parts[0].to_string(),
+            parts.get(1).copied().unwrap_or("").to_string(),
+            parts.get(2).copied().unwrap_or("wait"),
+        ),
+    };
+    let (pkg, mesh) = (pkg.as_str(), mesh.as_str());
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 20.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.32, 0.3))),

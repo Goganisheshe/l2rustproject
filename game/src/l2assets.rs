@@ -127,8 +127,8 @@ impl L2Library {
             Some(m) => {
                 let (cutout, two_sided) = (m.cutout, m.cutout || m.two_sided);
                 StandardMaterial {
-                    base_color_texture: Some(images.add(to_image(m.texture, true))),
-                    alpha_mode: if cutout { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque },
+                    base_color_texture: Some(images.add(to_image(m.texture.clone(), true))),
+                    alpha_mode: if cutout { AlphaMode::Mask(m.alpha_cutoff) } else { AlphaMode::Opaque },
                     double_sided: two_sided,
                     cull_mode: if two_sided { None } else { Some(bevy::render::render_resource::Face::Back) },
                     perceptual_roughness: 0.9,
@@ -140,6 +140,18 @@ impl L2Library {
         let handle = materials.add(mat);
         self.materials.insert(key, handle.clone());
         handle
+    }
+
+    /// Material for an export looked up by `package` and object name.
+    pub fn material_by_name(
+        &mut self,
+        package: &str,
+        object: &str,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<StandardMaterial>> {
+        let h = self.lib.as_mut()?.find(package, object)?;
+        Some(self.material(&h.package, ue2::ObjectRef::Export(h.export), materials, images))
     }
 
     /// Loads a static mesh as one Bevy mesh per section, already converted to

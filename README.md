@@ -21,16 +21,23 @@ The original client is read-only input. By default it is expected at
 cargo run -p l2survivor
 ```
 
-Controls: WASD / arrows or the left stick / D-pad to move, Enter / Space or
-gamepad A to confirm, Esc or Start to pause. Attacks are automatic.
+A run starts on the character screen: 16 race/sex/archetype combinations
+(human fighter/mystic, elf, dark elf, orc fighter/mystic, dwarf, kamael),
+each assembled from the client's face, hair and starter-armor parts.
+
+Controls: WASD / arrows or the left stick / D-pad to move or pick, Enter /
+Space or gamepad A to confirm, Esc or Start to pause. Attacks are automatic.
 
 Environment variables:
 
 - `L2_CLIENT_DIR` — client root.
 - `L2_GROUND=<package>:<texture>` — ground texture, e.g.
   `ertheia_v_t:ertheia_a_ground00` (default).
+- `L2_CLASS=<prefix>` — skip the character screen, e.g. `FElf`, `MKamael`.
 - `L2_MODEL=<package>:<mesh>[:<clip>]` — model viewer instead of the game,
-  e.g. `lineagemonsters:orc_m00:atk01`. `L2_VIEW_ANGLE`, `L2_VIEW_DIST`,
+  e.g. `lineagemonsters:orc_m00:atk01`; `class:<prefix>[:clip]` shows an
+  assembled player character. Several meshes can be joined with `+`, and
+  `mesh@package/material` forces a material. `L2_VIEW_ANGLE`, `L2_VIEW_DIST`,
   `L2_VIEW_HEIGHT` fix the camera.
 - `L2_VIEW=<package>:<static mesh>` — place one static mesh next to the start.
 - `L2_SCREENSHOT=<file.png>` — save a frame after `L2_SCREENSHOT_AT` seconds
@@ -44,7 +51,9 @@ cargo run --release -p l2tool -- names <package>           # name table
 cargo run --release -p l2tool -- textures <package> <dir>  # all textures to PNG
 cargo run --release -p l2tool -- scan <dir>...             # open every package, decode every texture
 cargo run --release -p l2tool -- obj <package> <mesh> <out.obj> # static mesh to OBJ
-cargo run --release -p l2tool -- materials <client> <package> <mesh>
+cargo run --release -p l2tool -- materials <client> <package> <mesh>  # static or skeletal
+cargo run --release -p l2tool -- bones <client> <package> <skeletal mesh>
+cargo run --release -p l2tool -- alpha <client> <package> <material>
 cargo run --release -p l2tool -- hex <package> <export> [n]
 ```
 
@@ -67,3 +76,14 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
 - Bone math: stored child-bone quaternions are conjugated relative to the
   root (ActorX convention). Unreal→Bevy axes: (x, y, z) → (x, z, y),
   quaternions (x, y, z, w) → (−x, −z, −y, w). 1 UU = 1/27 m.
+- Player characters: `<Prefix>_m000_f` face, `<Prefix>_m000_m00_ah/bh` hair
+  pieces, `<Prefix>_<set>_u/l/g/b` armor in `animations/<race>.ukx`. Faces and
+  hair have no material in the mesh; textures are
+  `lineagefacetex.<Prefix>_m000_t00_f` and
+  `<prefix>.<Prefix>_m000_t00_m00_ah/bh`. Armor uses `<Prefix>_<set>_tNN_<slot>`
+  variants from `systextures/<prefix>.utx`. Player clips carry a race suffix
+  (`run_1HS_MFighter`).
+- Some skeletons repeat a bone name (the right hand has a second
+  `Bip01_L_Finger01`); bones are matched by name and occurrence.
+- Under a Shader the diffuse alpha is a specular mask; only `Opacity` maps,
+  `AlphaTest` (with `AlphaRef`) or flags on bare textures make cutouts.

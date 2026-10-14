@@ -111,13 +111,25 @@ impl Library {
     /// Like `diffuse_texture`, plus blending hints gathered along the chain.
     pub fn material_info(&mut self, material: &ObjectHandle) -> Option<MaterialInfo> {
         let mut cur = material.clone();
-        let (mut cutout, mut two_sided) = (false, false);
+        let (mut cutout, mut two_sided, mut shader) = (false, false, false);
+        let mut alpha_ref: Option<u8> = None;
+        let mut opacity: Option<ObjectHandle> = None;
         for _ in 0..8 {
             let class = cur.class().to_ascii_lowercase();
             if class == "texture" {
-                let texture = read_texture(&cur.package, cur.export).ok()?;
-                cutout |= texture.masked || texture.alpha;
-                return Some(MaterialInfo { texture, cutout, two_sided });
+                let mut texture = read_texture(&cur.package, cur.export).ok()?;
+                // Under a Shader the diffuse alpha is the specular mask unless the
+                // shader names an opacity map; bare textures trust their flags.
+                if !shader {
+                    cutout |= texture.masked || texture.alpha;
+                }
+                if let Some(op) = opacity {
+                    if let Some(mask) = self.diffuse_texture(&op) {
+                        apply_alpha(&mut texture, &mask);
+                    }
+                }
+                let alpha_cutoff = alpha_ref.map(|r| (r as f32 / 255.0).max(0.02)).unwrap_or(0.5);
+                return Some(MaterialInfo { texture, cutout, two_sided, alpha_cutoff });
             }
             let field = match class.as_str() {
                 "shader" => "Diffuse",
@@ -125,12 +137,22 @@ impl Library {
                 "materialswitch" => "Current",
                 _ => "Material", // FinalBlend, TexPanner, TexEnvMap, TexOscillator, ...
             };
+            shader |= class == "shader";
             let pkg = cur.package.clone();
             let mut r = Reader::new(pkg.export_data(cur.export));
             let props = Properties::read(&pkg, &mut r).ok()?;
             let flag = |n: &str| matches!(props.get(&pkg, n), Some(Value::Bool(true)));
             // Shader with an opacity map, or FinalBlend with alpha test: foliage, fences...
-            cutout |= props.object(&pkg, "Opacity").is_some_and(|o| o != 0) || flag("AlphaTest");
+            if let Some(o) = props.object(&pkg, "Opacity").filter(|&o| o != 0) {
+                cutout = true;
+                if opacity.is_none() {
+                    opacity = self.resolve(&pkg, ObjectRef::from_raw(o));
+                }
+            }
+            if flag("AlphaTest") {
+                cutout = true;
+                alpha_ref = alpha_ref.or(props.byte(&pkg, "AlphaRef"));
+            }
             two_sided |= flag("TwoSided");
             let next = props.object(&pkg, field).map(ObjectRef::from_raw)?;
             cur = self.resolve(&pkg, next)?;
@@ -139,9 +161,26 @@ impl Library {
     }
 }
 
+/// Copies `mask`'s alpha into `tex` (nearest sampling if sizes differ).
+fn apply_alpha(tex: &mut Texture, mask: &Texture) {
+    let (w, h) = (tex.width as usize, tex.height as usize);
+    let (mw, mh) = (mask.width as usize, mask.height as usize);
+    if mw == 0 || mh == 0 {
+        return;
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let (mx, my) = (x * mw / w, y * mh / h);
+            tex.rgba[(y * w + x) * 4 + 3] = mask.rgba[(my * mw + mx) * 4 + 3];
+        }
+    }
+}
+
 pub struct MaterialInfo {
     pub texture: Texture,
     /// Alpha channel should be treated as a cutout mask.
     pub cutout: bool,
     pub two_sided: bool,
+    /// Alpha below this is discarded when `cutout` (from `AlphaRef`).
+    pub alpha_cutoff: f32,
 }

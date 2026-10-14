@@ -1,6 +1,7 @@
 //! L2 Survivor: Lineage II assets driven by a Vampire Survivors style loop.
 
 mod input;
+mod character;
 mod l2assets;
 mod skinned;
 mod survivor;

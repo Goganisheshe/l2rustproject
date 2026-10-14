@@ -12,11 +12,10 @@ use std::sync::Arc;
 
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 
+use crate::character::{find_class, part_spec, CLASSES};
 use crate::l2assets::{L2Library, L2Textures};
 use crate::skinned::{spawn_model, Animated, Model, ModelCache};
 
-/// Player character: (package, skeletal mesh).
-const PLAYER_MODEL: (&str, &str) = ("lineagenpcs", "a_royal_guardA_MHuman_m00");
 
 /// Enemy roster: (package, mesh, hp multiplier, speed, unlock minute).
 const ENEMY_KINDS: &[(&str, &str, f32, f32, f32)] = &[
@@ -63,7 +62,9 @@ const GEM_PICKUP_RADIUS: f32 = 0.6;
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GameState {
+    /// Race / class selection before a run.
     #[default]
+    Select,
     Playing,
     Paused,
     LevelUp,
@@ -231,7 +232,11 @@ impl Plugin for SurvivorPlugin {
         app.init_state::<GameState>()
             .init_resource::<Run>()
             .init_resource::<LevelUpChoice>()
-            .add_systems(Startup, (setup_world, start_run).chain())
+            .init_resource::<SelectState>()
+            .add_systems(Startup, setup_world)
+            .add_systems(OnEnter(GameState::Select), open_select)
+            .add_systems(Update, select_menu.run_if(in_state(GameState::Select)))
+            .add_systems(OnExit(GameState::Select), (close_menu, clear_preview, start_run).chain())
             .add_systems(
                 Update,
                 (
@@ -272,16 +277,6 @@ fn setup_world(
 ) {
     // Characters from the client's skeletal meshes.
     let mut roster = Roster::default();
-    roster.player = cache.load(
-        &mut lib,
-        PLAYER_MODEL.0,
-        PLAYER_MODEL.1,
-        None,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-        &mut bindposes,
-    );
     for &(p, m, hp, speed, unlock) in ENEMY_KINDS {
         if let Some(model) = cache.load(&mut lib, p, m, None, &mut meshes, &mut materials, &mut images, &mut bindposes) {
             roster.enemies.push((model, hp, speed, unlock));
@@ -699,14 +694,93 @@ fn tick_run(time: Res<Time>, mut run: ResMut<Run>) {
     run.time += time.delta_secs();
 }
 
+#[derive(Resource, Default)]
+struct SelectState {
+    index: usize,
+    shown: Option<usize>,
+}
+
+/// Character shown on the selection screen.
+#[derive(Component)]
+struct Preview;
+
+fn open_select(mut commands: Commands, mut state: ResMut<SelectState>) {
+    // L2_CLASS=<prefix or name> skips the menu (handy for unattended runs).
+    if let Some(i) = std::env::var("L2_CLASS").ok().and_then(|k| find_class(&k)) {
+        state.index = i;
+    }
+    state.shown = None;
+    let lines: Vec<String> = CLASSES.iter().map(|c| c.name.to_string()).collect();
+    spawn_menu_styled(&mut commands, "Choose your character", &lines, true);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_menu(
+    mut commands: Commands,
+    input: Res<PlayerInput>,
+    mut state: ResMut<SelectState>,
+    mut roster: ResMut<Roster>,
+    mut next: ResMut<NextState<GameState>>,
+    mut lines: Query<(&MenuLine, &mut TextColor)>,
+    previews: Query<Entity, With<Preview>>,
+    mut lib: ResMut<L2Library>,
+    mut cache: ResMut<ModelCache>,
+    mut assets: (
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<StandardMaterial>>,
+        ResMut<Assets<Image>>,
+        ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    ),
+) {
+    let n = CLASSES.len();
+    if input.nav != 0 {
+        state.index = (state.index as i32 + input.nav).rem_euclid(n as i32) as usize;
+    }
+    for (line, mut color) in &mut lines {
+        color.0 = if line.0 == state.index { Color::srgb(1.0, 0.85, 0.3) } else { Color::WHITE };
+    }
+    if state.shown != Some(state.index) {
+        state.shown = Some(state.index);
+        for e in &previews {
+            commands.entity(e).despawn();
+        }
+        let class = &CLASSES[state.index];
+        let spec = part_spec(&mut lib, class);
+        let (meshes, materials, images, bindposes) = &mut assets;
+        roster.player = cache.load(&mut lib, class.package, &spec, None, meshes, materials, images, bindposes);
+        // Face the camera (+Z); models look along +X.
+        let root = commands
+            .spawn((Preview, Transform::from_xyz(1.2, 0.0, 0.0).with_rotation(Quat::from_rotation_y(-FRAC_PI_2)), Visibility::default()))
+            .id();
+        if let Some(model) = &roster.player {
+            spawn_model(&mut commands, model, root, "wait_1HS");
+        }
+    }
+    if input.confirm || std::env::var_os("L2_CLASS").is_some() {
+        next.set(GameState::Playing);
+    }
+}
+
+fn clear_preview(mut commands: Commands, previews: Query<Entity, With<Preview>>) {
+    for e in &previews {
+        commands.entity(e).despawn();
+    }
+}
+
 fn follow_camera(
     time: Res<Time>,
     player: Option<Single<&Transform, With<Player>>>,
     mut cam: Single<&mut Transform, (With<Camera3d>, Without<Player>)>,
 ) {
-    let Some(player) = player else { return };
-    let target = player.translation + Vec3::new(0.0, 11.0, 7.5);
     let k = 1.0 - (-8.0 * time.delta_secs()).exp();
+    let Some(player) = player else {
+        // Selection screen: close-up on the preview character.
+        let eye = Vec3::new(0.0, 1.6, 4.2);
+        cam.translation = cam.translation.lerp(eye, k);
+        cam.look_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y);
+        return;
+    };
+    let target = player.translation + Vec3::new(0.0, 11.0, 7.5);
     cam.translation = cam.translation.lerp(target, k);
     let eye = cam.translation;
     cam.look_at(eye - Vec3::new(0.0, 11.0, 7.5), Vec3::Y);
@@ -740,6 +814,12 @@ fn pause_toggle(input: Res<PlayerInput>, state: Res<State<GameState>>, mut next:
 }
 
 fn spawn_menu(commands: &mut Commands, title: &str, lines: &[String]) {
+    spawn_menu_styled(commands, title, lines, false);
+}
+
+/// `side`: a compact list on the left that leaves the scene visible.
+fn spawn_menu_styled(commands: &mut Commands, title: &str, lines: &[String], side: bool) {
+    let (title_px, line_px, gap) = if side { (32.0, 20.0, 4.0) } else { (40.0, 26.0, 10.0) };
     commands
         .spawn((
             Menu,
@@ -749,16 +829,17 @@ fn spawn_menu(commands: &mut Commands, title: &str, lines: &[String]) {
                 height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                row_gap: Val::Px(10.0),
+                align_items: if side { AlignItems::FlexStart } else { AlignItems::Center },
+                padding: UiRect::left(Val::Px(if side { 48.0 } else { 0.0 })),
+                row_gap: Val::Px(gap),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, if side { 0.0 } else { 0.6 })),
         ))
         .with_children(|p| {
-            p.spawn((Text::new(title), TextFont { font_size: FontSize::Px(40.0), ..default() }));
+            p.spawn((Text::new(title), TextFont { font_size: FontSize::Px(title_px), ..default() }));
             for (i, line) in lines.iter().enumerate() {
-                p.spawn((MenuLine(i), Text::new(line.clone()), TextFont { font_size: FontSize::Px(26.0), ..default() }));
+                p.spawn((MenuLine(i), Text::new(line.clone()), TextFont { font_size: FontSize::Px(line_px), ..default() }));
             }
         });
 }

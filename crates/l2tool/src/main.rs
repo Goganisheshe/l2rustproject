@@ -10,6 +10,8 @@ fn main() -> Result<()> {
         Some("scan") => scan(&args[2..]),
         Some("obj") => obj(&args[2], &args[3], &args[4]),
         Some("materials") => materials(&args[2], &args[3], &args[4]),
+        Some("bones") => skel_bones(&args[2], &args[3], &args[4]),
+        Some("alpha") => mat_alpha(&args[2], &args[3], &args[4]),
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
@@ -198,10 +200,16 @@ fn obj(path: &str, name: &str, out: &str) -> Result<()> {
 fn materials(client: &str, package: &str, mesh: &str) -> Result<()> {
     let mut lib = ue2::library::Library::new(client)?;
     let h = lib.find(package, mesh).with_context(|| format!("no {package}:{mesh}"))?;
-    let m = ue2::mesh::read_static_mesh(&h.package, h.export)?;
-    for (i, s) in m.sections.iter().enumerate() {
-        let full = h.package.full_name(s.material);
-        match lib.resolve(&h.package, s.material) {
+    let refs: Vec<ue2::ObjectRef> = if h.class().eq_ignore_ascii_case("SkeletalMesh") {
+        let m = ue2::skel::read_skeletal_mesh(&h.package, h.export)?;
+        println!("{} sections: {:?}", m.name, m.sections.iter().map(|s| (s.material, s.num_indices / 3)).collect::<Vec<_>>());
+        m.materials
+    } else {
+        ue2::mesh::read_static_mesh(&h.package, h.export)?.sections.iter().map(|s| s.material).collect()
+    };
+    for (i, mref) in refs.iter().enumerate() {
+        let full = h.package.full_name(*mref);
+        match lib.resolve(&h.package, *mref) {
             Some(mat) => {
                 let tex = lib.diffuse_texture(&mat);
                 println!(
@@ -213,6 +221,68 @@ fn materials(client: &str, package: &str, mesh: &str) -> Result<()> {
                 );
             }
             None => println!("section {i}: {full} -> unresolved"),
+        }
+    }
+    Ok(())
+}
+
+/// Dumps bones and per-bone vertex counts of a skeletal mesh.
+pub fn skel_bones(client: &str, package: &str, mesh: &str) -> Result<()> {
+    let mut lib = ue2::library::Library::new(client)?;
+    let h = lib.find(package, mesh).with_context(|| format!("no {package}:{mesh}"))?;
+    let m = ue2::skel::read_skeletal_mesh(&h.package, h.export)?;
+    let mut mn = [f32::MAX; 3];
+    let mut mx = [f32::MIN; 3];
+    for p in &m.positions {
+        for k in 0..3 {
+            mn[k] = mn[k].min(p[k]);
+            mx[k] = mx[k].max(p[k]);
+        }
+    }
+    println!(
+        "{} verts, {} tris, bounds {mn:?}..{mx:?}, scale {:?} origin {:?} rot {:?}",
+        m.positions.len(),
+        m.indices.len() / 3,
+        m.scale,
+        m.origin,
+        m.rot_origin
+    );
+    let mut used = vec![0usize; m.bones.len()];
+    for (j, w) in m.joints.iter().zip(&m.weights) {
+        for k in 0..4 {
+            if w[k] > 0.0 {
+                used[j[k] as usize] += 1;
+            }
+        }
+    }
+    for (i, b) in m.bones.iter().enumerate() {
+        println!("{i:3} {:<28} parent {:3} verts {:4} t {:?}", b.name, b.parent, used[i], b.translation);
+    }
+    Ok(())
+}
+
+/// Prints alpha statistics of a material's diffuse and opacity textures.
+pub fn mat_alpha(client: &str, package: &str, material: &str) -> Result<()> {
+    let mut lib = ue2::library::Library::new(client)?;
+    let h = lib.find(package, material).with_context(|| format!("no {package}:{material}"))?;
+    let mut r = ue2::Reader::new(h.package.export_data(h.export));
+    let props = ue2::props::Properties::read(&h.package, &mut r)?;
+    for p in &props.0 {
+        println!("  prop {} = {:?}", h.package.name(p.name), p.value);
+    }
+    let stats = |t: &ue2::texture::Texture| {
+        let px = (t.rgba.len() / 4).max(1);
+        let clear = t.rgba.chunks_exact(4).filter(|p| p[3] < 128).count();
+        let dark = t.rgba.chunks_exact(4).filter(|p| (p[0] as u32 + p[1] as u32 + p[2] as u32) < 3 * 128).count();
+        format!("{} {:?} alpha<128: {}%, rgb dark: {}%", t.name, t.format, clear * 100 / px, dark * 100 / px)
+    };
+    for field in ["Diffuse", "Opacity", "Material"] {
+        if let Some(o) = props.object(&h.package, field).filter(|&o| o != 0) {
+            if let Some(m) = lib.resolve(&h.package, ue2::ObjectRef::from_raw(o)) {
+                if let Some(t) = lib.diffuse_texture(&m) {
+                    println!("{field}: {}", stats(&t));
+                }
+            }
         }
     }
     Ok(())
