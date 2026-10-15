@@ -152,6 +152,7 @@ cargo run --release -p l2tool -- dat <client>                # decode skillgrp/n
 cargo run --release -p l2tool -- props <package> <export>     # tagged properties
 cargo run --release -p l2tool -- defaults <package> <class>   # class default properties
 cargo run --release -p l2tool -- effect <package> <class>     # effect emitters
+cargo run --release -p l2tool -- ribbons <package>...         # effect classes with beam / trail emitters
 cargo run --release -p l2tool -- map <client> <tile>           # map actors and terrain layers
 cargo run --release -p l2tool -- hex <package> <export> [n]
 ```
@@ -201,7 +202,7 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   Their SpriteEmitter/MeshEmitter subobjects hold tagged properties; non-native
   structs (`Range`, `RangeVector`, array elements) are nested tagged streams,
   native ones (`Vector`, `Color`) are raw. `game/src/effects.rs` plays sprite and
-  mesh emitters (beams/trails are skipped).
+  mesh emitters and draws beam and trail emitters as ribbons (`ribbon.rs`).
 - Skill visuals: `skillgrp` gives an animation combo code (`E`, `S`, `SMB01`;
   some single letters share a string slot shown as `L2Day - E`).
   `animationcombo` maps it to pawn variables (`CastMidAnimName`...), whose clip
