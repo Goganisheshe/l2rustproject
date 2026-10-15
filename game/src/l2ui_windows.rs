@@ -266,6 +266,7 @@ fn status_wnd(
 #[allow(clippy::type_complexity)]
 fn fill_status(
     dp: Res<Datapack>,
+    creation: Res<crate::mmo::Creation>,
     stats: Single<&HeroStats, With<Hero>>,
     ctrls: Query<(&UiCtrl, &Children)>,
     mut fills: Query<(&BarFill, &mut Node)>,
@@ -304,6 +305,7 @@ fn fill_status(
             continue;
         }
         let v = match c.name.as_str() {
+            "txtName1" if !creation.name.is_empty() => creation.name.clone(),
             "txtName1" => dp.class_name(t.class_id).to_string(),
             "txtLvName" => s.level.to_string(),
             "txtClassName" => dp.class_name(t.class_id).to_string(),

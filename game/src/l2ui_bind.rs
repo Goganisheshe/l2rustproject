@@ -32,6 +32,9 @@ fn hidden(name: &str) -> bool {
         || matches!(name, "TradeChat" | "PartyChat" | "ClanChat" | "AllyChat" | "ReduceButton" | "texAltitude" | "texDist" | "NpcInfo" | "barMP")
         || (name.starts_with("txt") && (name.contains("Pledge") || name.contains("Alliance")))
         || name.starts_with("ShortcutWndVertical")
+        // Target buffs, clan crests and rank are not shown offline.
+        || name.starts_with("btnBuffMoreView")
+        || matches!(name, "BuffWnd" | "StatusIcons" | "texPledgeCrest" | "texPledgeAllianceCrest" | "RankName")
         || (name.starts_with("ShortcutWndHorizontal_"))
 }
 
@@ -47,22 +50,10 @@ fn build_hud(
     let screen = windows.iter().next().map_or(Vec2::new(1920.0, 1080.0), |w| Vec2::new(w.width(), w.height()));
     let x = &iface.0;
     for name in ["StatusWnd", "TargetStatusWnd", "ChatWnd"] {
-        let Some(root) = spawn_window(&mut commands, &iface, x, name, screen, &hidden, &mut tex, &mut lib, &mut images) else {
+        let Some(_) = spawn_window(&mut commands, &iface, x, name, screen, &hidden, &mut tex, &mut lib, &mut images) else {
             warn!("window {name} not in interface.xdat");
             continue;
         };
-        if name == "TargetStatusWnd" {
-            // The client draws the target's name itself.
-            commands.spawn((
-                UiCtrl { window: name.into(), name: "TargetName".into(), class: "TextBox".into(), size: Vec2::ZERO },
-                CtrlText,
-                Text::new(""),
-                TextFont { font_size: FontSize::Px(12.0), ..default() },
-                TextColor(Color::srgb(0.95, 0.9, 0.8)),
-                Node { position_type: PositionType::Absolute, left: Val::Px(40.0), top: Val::Px(7.0), ..default() },
-                ChildOf(root),
-            ));
-        }
     }
     spawn_menu_bar(&mut commands, &mut tex, &mut lib, &mut images);
     // The horizontal shortcut bar is a sub-window of ShortcutWnd with its own
@@ -130,6 +121,7 @@ fn spawn_menu_bar(commands: &mut Commands, tex: &mut UiTextures, lib: &mut L2Lib
 
 fn status_window(
     dp: Res<Datapack>,
+    creation: Res<crate::mmo::Creation>,
     stats: Single<&HeroStats, With<Hero>>,
     ctrls: Query<(&UiCtrl, &Children)>,
     mut fills: Query<(&BarFill, &mut Node)>,
@@ -158,7 +150,7 @@ fn status_window(
     }
     for (ctrl, mut t) in named_texts {
         if ctrl.window == "StatusWnd" {
-            if let Some(v) = status_texts(&dp, s, &ctrl.name) {
+            if let Some(v) = status_texts(&dp, s, &ctrl.name, &creation.name) {
                 if t.0 != v {
                     t.0 = v;
                 }
@@ -168,10 +160,10 @@ fn status_window(
 }
 
 /// Level and name texts of the status window.
-fn status_texts(dp: &Datapack, s: &HeroStats, name: &str) -> Option<String> {
-    match name {
+fn status_texts(dp: &Datapack, s: &HeroStats, ctrl: &str, name: &str) -> Option<String> {
+    match ctrl {
         "StatusWnd_LevelTextBox" => Some(s.level.to_string()),
-        "UserName" => Some(dp.class_name(s.template.class_id).to_string()),
+        "UserName" => Some(if name.is_empty() { dp.class_name(s.template.class_id).to_string() } else { name.to_string() }),
         _ => None,
     }
 }
@@ -209,7 +201,7 @@ fn target_window(
     }
     let name = format!("{}  Lv {}", n.template.name, n.template.level);
     for (ctrl, mut t) in &mut texts {
-        if ctrl.window == "TargetStatusWnd" && ctrl.name == "TargetName" && t.0 != name {
+        if ctrl.window == "TargetStatusWnd" && ctrl.name == "UserName" && t.0 != name {
             t.0 = name.clone();
         }
     }

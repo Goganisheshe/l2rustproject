@@ -247,7 +247,13 @@ pub fn settle(pos: Vec3, streamer: &TileStreamer, world: &CollisionWorld) -> f32
         }
         (Some(f), None) => f,
         (None, Some(t)) => t,
-        (None, None) => streamer.ground_y(pos).unwrap_or(pos.y),
+        // Nothing near the server height: trust it unless the terrain is
+        // below (a guessed start point). Terrain far above is the hill over
+        // a cave (the Kamael village).
+        (None, None) => match streamer.ground_y(pos) {
+            Some(t) if t < pos.y => t,
+            _ => pos.y,
+        },
     }
 }
 
@@ -424,7 +430,9 @@ fn move_hero(
     }
     // Stand on the highest surface within a step of the feet: building
     // floors and stairs, else the terrain.
-    let terrain = streamer.ground_y(tr.translation);
+    // Terrain well above the feet is the hill over a cave (the Kamael
+    // village): not something to step onto.
+    let terrain = streamer.ground_y(tr.translation).filter(|t| *t <= tr.translation.y + 1.0);
     let floor = world.ground(tr.translation, 0.6, 3.0);
     let ground = match (terrain, floor) {
         (Some(t), Some(f)) => Some(t.max(f)),

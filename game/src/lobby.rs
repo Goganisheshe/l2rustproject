@@ -147,7 +147,8 @@ fn enter_login(
 ) {
     // Tests skip the screens: L2_CLASS starts a new character, L2_CONTINUE
     // plays the first saved one.
-    if let Some(i) = std::env::var("L2_CLASS").ok().and_then(|k| crate::character::find_class(&k)) {
+    let class = std::env::var("L2_CLASS").ok().map(|k| crate::character::find_class(&k).or(k.parse().ok().filter(|i: &usize| *i < CLASSES.len())).unwrap_or(0));
+    if let Some(i) = class {
         c.index = i;
         c.name = "Tester".into();
         let free = save::list().iter().position(|s| s.is_none()).unwrap_or(save::SLOTS - 1);
@@ -341,7 +342,7 @@ fn select(
 #[allow(clippy::too_many_arguments)]
 fn show_stage(
     mut commands: Commands,
-    mut st: ResMut<LobbyState>,
+    st: ResMut<LobbyState>,
     mut c: ResMut<Creation>,
     mut ua: UiAssets,
     mut cache: ResMut<ModelCache>,

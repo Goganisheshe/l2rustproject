@@ -24,7 +24,7 @@ fn main() -> Result<()> {
                     return;
                 }
                 println!(
-                    "{}{} [{}] {}x{} at {:?} {},{} tex {} type {} uv {},{} {}x{}",
+                    "{}{} [{}] {}x{} at {:?} {},{} rel {} own {} auto {:?} tex {} type {} uv {},{} {}x{}",
                     "  ".repeat(depth),
                     e.name(),
                     e.class,
@@ -33,6 +33,9 @@ fn main() -> Result<()> {
                     e.str("relativeTo"),
                     e.float("x"),
                     e.float("y"),
+                    e.int("relativePoint"),
+                    e.int("anchorPoint"),
+                    e.flag("autosize"),
                     [e.str("file"), e.str("backTex"), e.str("normalTex"), e.str("foreTex")].concat(),
                     e.int("type"),
                     e.float("u"),

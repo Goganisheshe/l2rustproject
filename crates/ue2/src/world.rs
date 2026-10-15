@@ -34,6 +34,39 @@ pub struct Terrain {
     pub location: [f32; 3],
     pub scale: [f32; 3],
     pub layers: Vec<TerrainLayer>,
+    /// One bit per quad (row-major, heightmap width per row): 0 = a hole,
+    /// e.g. where a cave entrance or a building goes into the ground.
+    pub visibility: Vec<u32>,
+    /// One bit per quad: split along the other diagonal.
+    pub edge_turn: Vec<u32>,
+}
+
+impl Terrain {
+    fn bit(bits: &[u32], quad: usize) -> Option<bool> {
+        bits.get(quad / 32).map(|w| w >> (quad % 32) & 1 == 1)
+    }
+
+    /// Whether quad `quad` is drawn (no bitmap = all are).
+    pub fn quad_visible(&self, quad: usize) -> bool {
+        Self::bit(&self.visibility, quad).unwrap_or(true)
+    }
+
+    pub fn quad_turned(&self, quad: usize) -> bool {
+        Self::bit(&self.edge_turn, quad).unwrap_or(false)
+    }
+}
+
+/// An `array<int>` property (compact count, then the ints).
+fn int_array(pkg: &Package, p: &Properties, name: &str) -> Vec<u32> {
+    let Some(data) = p.0.iter().find(|x| pkg.name(x.name).eq_ignore_ascii_case(name)).and_then(|x| match &x.value {
+        crate::props::Value::Raw { data, .. } => Some(data),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let mut r = crate::Reader::new(data);
+    let Ok(n) = r.compact() else { return Vec::new() };
+    (0..n.max(0)).map_while(|_| r.u32().ok()).collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,6 +119,8 @@ pub fn read_map(pkg: &Package) -> Result<MapTile, Error> {
                     location: p.vector(pkg, "Location").unwrap_or([0.0; 3]),
                     scale: p.vector(pkg, "TerrainScale").unwrap_or([64.0, 64.0, 64.0]),
                     layers,
+                    visibility: int_array(pkg, &p, "QuadVisibilityBitmap"),
+                    edge_turn: int_array(pkg, &p, "EdgeTurnBitmap"),
                 });
             }
             _ => {}

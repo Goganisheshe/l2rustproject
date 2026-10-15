@@ -38,6 +38,13 @@ impl UiTextures {
 /// Windows move by dragging them, as in the client, and keep the spot when
 /// they are rebuilt.
 pub fn make_draggable(commands: &mut Commands, root: Entity, name: &str) {
+    // The newest window, and the one last clicked, is drawn on top.
+    static TOP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(10);
+    let raise = || GlobalZIndex(TOP.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    commands.entity(root).insert(raise());
+    commands.entity(root).observe(move |_: On<bevy::picking::events::PointerPress>, mut commands: Commands| {
+        commands.entity(root).insert(raise());
+    });
     let name = name.to_string();
     commands.entity(root).observe(move |d: On<bevy::picking::events::PointerDrag>, mut nodes: Query<&mut Node>, mut tex: ResMut<UiTextures>| {
         if d.button != PointerButton::Primary {
@@ -174,10 +181,16 @@ fn load_interface(mut commands: Commands) {
     match std::fs::read(root.join("system/interface.xdat")).map_err(|e| e.to_string()).and_then(|d| ue2::xdat::parse(&d).map_err(|e| e.to_string())) {
         Ok(x) => {
             let sys = root.join("system");
-            let strings = ["sysstring-ru.dat", "sysstring-e.dat"]
-                .iter()
-                .find_map(|f| ue2::dat::read_dat(sys.join(f)).ok().and_then(|d| ue2::dat::parse_sysstring(&d).ok()))
-                .unwrap_or_default();
+            let load = |f: &str| ue2::dat::read_dat(sys.join(f)).ok().and_then(|d| ue2::dat::parse_sysstring(&d).ok()).unwrap_or_default();
+            // Russian labels; entries the Russian table leaves untranslated
+            // ("???", empty) come from the English one.
+            let mut strings = load("sysstring-ru.dat");
+            for (id, en) in load("sysstring-e.dat") {
+                let e = strings.entry(id).or_default();
+                if e.trim().is_empty() || e.contains("??") {
+                    *e = en;
+                }
+            }
             info!("interface.xdat: {} windows, {} sysstrings", x.windows.len(), strings.len());
             commands.insert_resource(Interface(Arc::new(x), Arc::new(strings)));
         }
@@ -226,7 +239,11 @@ fn size_of(e: &Element, parent: Rect) -> Vec2 {
 }
 
 /// Lays out a window's controls (flattened) relative to its own top left.
-fn layout(win: &Element, root: Rect, hide: &dyn Fn(&str) -> bool, out: &mut Vec<(Element, Rect, usize)>) {
+/// Width of an autosized text control's label (it grows with its text, and
+/// controls attached to its right follow).
+type Measure<'a> = &'a dyn Fn(&Element) -> Option<f32>;
+
+fn layout(win: &Element, root: Rect, hide: &dyn Fn(&str) -> bool, measure: Measure, out: &mut Vec<(Element, Rect, usize)>) {
     // (element, parent rect, depth)
     let mut pending: Vec<(&Element, Rect, usize)> = win.children().iter().map(|c| (c, root, 1)).collect();
     let mut rects: HashMap<String, Rect> = HashMap::new();
@@ -245,10 +262,18 @@ fn layout(win: &Element, root: Rect, hide: &dyn Fn(&str) -> bool, out: &mut Vec<
                 next.push((e, parent, depth));
                 continue;
             };
-            let size = size_of(e, parent);
+            let mut size = size_of(e, parent);
+            if e.class == "TextBox" && e.flag("autosize") {
+                if let Some(w) = measure(e) {
+                    size.x = w;
+                }
+            }
             let pos = if e.flag("usePosition") {
-                let rel = e.int("relativePoint").max(1);
-                let own = e.int("anchorPoint").max(1);
+                // `anchorPoint` is the point on the control it is attached
+                // to, `relativePoint` the control's own point (a label's
+                // value: own top left at the label's top right).
+                let rel = e.int("anchorPoint").max(1);
+                let own = e.int("relativePoint").max(1);
                 let target_pt = point(anchor, rel);
                 let own_off = point(Rect { x: 0.0, y: 0.0, w: size.x, h: size.y }, own);
                 target_pt - own_off + Vec2::new(e.float("x"), e.float("y"))
@@ -360,12 +385,24 @@ pub fn spawn_button(commands: &mut Commands, ua: &mut UiAssets, parent: Entity, 
     id
 }
 
+/// Labels the Russian client leaves as Korean placeholders or empty (its
+/// scripts fill them from strings this offline build does not have).
+fn label_override(window: &str, ctrl: &str) -> Option<&'static str> {
+    match (window, ctrl) {
+        ("SystemMenuWnd", "txtArchive") => Some("Архив"),
+        ("SystemMenuWnd", "txtMovieRec") => Some("Запись видео"),
+        ("SystemMenuWnd", "txtBBS") => Some("Форум"),
+        ("SystemMenuWnd", "txtMacro") => Some("Макросы"),
+        _ => None,
+    }
+}
+
 /// Position (inside its window) and size of a control, as laid out.
 pub fn ctrl_rect(x: &Xdat, window: &str, ctrl: &str, screen: Vec2) -> Option<(Vec2, Vec2)> {
     let win = x.window(window)?;
     let r = window_rect(x, win, screen);
     let mut items = Vec::new();
-    layout(win, Rect { x: 0.0, y: 0.0, w: r.w, h: r.h }, &|_| false, &mut items);
+    layout(win, Rect { x: 0.0, y: 0.0, w: r.w, h: r.h }, &|_| false, &|_| None, &mut items);
     items.into_iter().find(|(e, _, _)| e.name() == ctrl).map(|(_, r, _)| (Vec2::new(r.x, r.y), Vec2::new(r.w, r.h)))
 }
 
@@ -458,9 +495,19 @@ pub fn spawn_window(
         ));
     }
     let mut items = Vec::new();
-    layout(win, Rect { x: 0.0, y: 0.0, w: rect.w, h: rect.h }, hide, &mut items);
+    // Labels: about 6.5 px per character at the UI font size.
+    let measure = |e: &Element| {
+        let text = e.str("text");
+        let text = if text == "undefined" || text.is_empty() { iface.string(e.int("sysstring")).unwrap_or("") } else { text };
+        (!text.is_empty()).then(|| text.chars().count() as f32 * 6.5)
+    };
+    layout(win, Rect { x: 0.0, y: 0.0, w: rect.w, h: rect.h }, hide, &measure, &mut items);
+    let dump = std::env::var_os("L2_UI_DUMP").is_some();
     for (e, r, _) in items {
         let n = e.name();
+        if dump {
+            info!("{} {} [{}] at {},{} size {}x{} (window at {},{})", win.name(), n, e.class, r.x, r.y, r.w, r.h, rect.x, rect.y);
+        }
         let ctrl = UiCtrl { window: win.name().into(), name: n.into(), class: e.class.clone(), size: Vec2::new(r.w, r.h) };
         let node = abs_node(r, Vec2::ZERO);
         let id = commands.spawn((ctrl, node, ChildOf(root))).id();
@@ -497,6 +544,43 @@ pub fn spawn_window(
                         TextFont { font_size: FontSize::Px(11.0), ..default() },
                         TextLayout { justify: Justify::Center, ..default() },
                     ));
+                    // Label centred vertically, as the client draws it.
+                    let pad = ((r.h - 14.0) / 2.0).max(0.0);
+                    commands.entity(id).entry::<Node>().and_modify(move |mut n| n.padding = UiRect::top(Val::Px(pad)));
+                }
+            }
+            "Tab" => {
+                // A row of tab buttons; the first is the open one. Clicks
+                // arrive as (window, "<tab control>#<index>").
+                let mut x = 0.0;
+                for (i, t) in e.list("tabs").iter().enumerate() {
+                    let w = if t.int("width") > 0 { t.int("width") as f32 } else { 70.0 };
+                    let h = if t.int("height") > 0 { t.int("height") as f32 } else { r.h };
+                    let texture = if i == 0 { t.str("pushedTex") } else { t.str("normalTex") };
+                    let label = t.str("buttonNameText");
+                    let label = if label.is_empty() || label == "undefined" { iface.string(t.int("buttonName")).unwrap_or("") } else { label };
+                    let mut b = commands.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(x),
+                            top: Val::Px(0.0),
+                            width: Val::Px(w),
+                            height: Val::Px(h),
+                            padding: UiRect::top(Val::Px(((h - 14.0) / 2.0).max(0.0))),
+                            ..default()
+                        },
+                        Text::new(label),
+                        TextFont { font_size: FontSize::Px(11.0), ..default() },
+                        TextColor(if i == 0 { Color::srgb(0.95, 0.85, 0.55) } else { Color::srgb(0.7, 0.68, 0.62) }),
+                        TextLayout { justify: Justify::Center, linebreak: LineBreak::NoWrap },
+                        ChildOf(id),
+                    ));
+                    if let Some(tx) = tex.get(texture, lib, images) {
+                        b.insert(image_node(&tx, None));
+                    }
+                    let (wn, c) = (win.name().to_string(), format!("{n}#{i}"));
+                    b.observe(move |_: On<bevy::picking::events::PointerClick>, mut clicks: ResMut<UiClicks>| clicks.0.push((wn.clone(), c.clone())));
+                    x += w + t.int("gap").max(0) as f32;
                 }
             }
             "StatusBar" => {
@@ -532,6 +616,7 @@ pub fn spawn_window(
             "TextBox" | "NameCtrl" => {
                 let text = e.str("text");
                 let text = if text == "undefined" || text.is_empty() { iface.string(e.int("sysstring")).unwrap_or("") } else { text };
+                let text = label_override(win.name(), n).unwrap_or(text);
                 commands.entity(id).insert((
                     CtrlText,
                     Text::new(text),
@@ -539,6 +624,14 @@ pub fn spawn_window(
                     TextColor(Color::srgb(0.85, 0.82, 0.75)),
                     TextLayout { linebreak: LineBreak::NoWrap, ..default() },
                 ));
+                // Script-sized boxes (negative sizes larger than the window)
+                // come out empty: let the text size them.
+                if r.h < 12.0 || r.w < 8.0 {
+                    commands.entity(id).entry::<Node>().and_modify(|mut n| {
+                        n.height = Val::Auto;
+                        n.width = Val::Auto;
+                    });
+                }
             }
             "ItemWindow" => {
                 let iw = Vec2::new(e.int("iconWidth").max(32) as f32, e.int("iconHeight").max(32) as f32);

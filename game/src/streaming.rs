@@ -64,6 +64,8 @@ pub struct HeightField {
     height: usize,
     /// Bevy Y per vertex.
     y: Vec<f32>,
+    /// Quads cut out of the terrain (cave mouths): no ground there.
+    holes: Vec<bool>,
 }
 
 impl HeightField {
@@ -75,6 +77,9 @@ impl HeightField {
             return None;
         }
         let (i, j) = (fx.floor() as usize, fz.floor() as usize);
+        if self.holes.get(j * self.width + i).copied().unwrap_or(false) {
+            return None;
+        }
         let (i1, j1) = ((i + 1).min(self.width - 1), (j + 1).min(self.height - 1));
         let (tx, tz) = (fx - i as f32, fz - j as f32);
         let h = |a: usize, b: usize| self.y[b * self.width + a];
@@ -231,8 +236,14 @@ fn prepare_tile(
         placements: Vec::new(),
     };
     // The Classic world: prefer `X_Y_Classic.unr` where the client has one.
-    let Some(pkg) = lib.package(&format!("{name}_Classic")).or_else(|| lib.package(name)) else { return out };
-    let Ok(tile) = read_map(&pkg) else { return out };
+    // Regions Classic leaves out (the Kamael island, Gracia, Hellbound...) are
+    // stubs there: flat terrain and no actors. Those use the full tile.
+    let classic = lib.package(&format!("{name}_Classic")).and_then(|p| read_map(&p).ok().map(|t| (p, t)));
+    let picked = match classic {
+        Some((p, t)) if !t.actors.is_empty() => Some((p, t)),
+        stub => lib.package(name).and_then(|p| read_map(&p).ok().map(|t| (p, t))).or(stub),
+    };
+    let Some((pkg, tile)) = picked else { return out };
     if let Some(t) = tile.terrains.first() {
         out.terrain = prepare_terrain(lib, &pkg, t);
     }
@@ -395,11 +406,21 @@ fn prepare_terrain(lib: &mut Library, pkg: &std::sync::Arc<ue2::Package>, t: &Te
         }
     }
     let mut indices = Vec::with_capacity((w - 1) * (h - 1) * 6);
+    let mut holes = vec![false; w * h];
     for j in 0..h - 1 {
         for i in 0..w - 1 {
-            let a = (j * w + i) as u32;
+            let quad = j * w + i;
+            if !t.quad_visible(quad) {
+                holes[quad] = true;
+                continue;
+            }
+            let a = quad as u32;
             let (b, c, d) = (a + 1, a + w as u32, a + w as u32 + 1);
-            indices.extend_from_slice(&[a, c, b, b, c, d]);
+            if t.quad_turned(quad) {
+                indices.extend_from_slice(&[a, c, d, a, d, b]);
+            } else {
+                indices.extend_from_slice(&[a, c, b, b, c, d]);
+            }
         }
     }
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
@@ -407,6 +428,7 @@ fn prepare_terrain(lib: &mut Library, pkg: &std::sync::Arc<ue2::Package>, t: &Te
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
+    debug!("terrain: {} hole quads, {} turned bitmap words", holes.iter().filter(|h| **h).count(), t.edge_turn.len());
     let origin = ue_to_bevy([loc[0] - w as f32 / 2.0 * sx, loc[1] - h as f32 / 2.0 * sy, 0.0]);
     let field = HeightField {
         origin: Vec3::new(origin.x, 0.0, origin.z),
@@ -414,6 +436,7 @@ fn prepare_terrain(lib: &mut Library, pkg: &std::sync::Arc<ue2::Package>, t: &Te
         width: w,
         height: h,
         y: ys,
+        holes,
     };
     let image = bake_layers(lib, pkg, t, w)?;
     Some((mesh, image, field))
