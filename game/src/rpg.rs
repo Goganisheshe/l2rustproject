@@ -720,8 +720,15 @@ fn npc_ai(
     for (_, mut npc, mut tr) in &mut npcs {
         let anim = npc.actor.and_then(|a| anims.get_mut(a).ok());
         if npc.state == NpcState::Dead {
+            // Fall, then lie still (`deathwait`) like the client.
             if let Some(mut a) = anim {
-                a.play(&["Death"], false);
+                let lying = a.model.clip("DeathWait").is_some_and(|c| c == a.clip);
+                if !lying {
+                    a.play(&["Death"], false);
+                    if a.finished() {
+                        a.play(&["DeathWait"], true);
+                    }
+                }
             }
             continue;
         }

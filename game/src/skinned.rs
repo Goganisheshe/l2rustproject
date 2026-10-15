@@ -416,14 +416,22 @@ pub fn spawn_model(
     actor
 }
 
-fn sample(key: &Key, frame: f32, frames: f32) -> (Option<Vec3>, Quat) {
+/// Pose of one bone at rame. Looping clips blend the last key back into
+/// the first; a clip that plays once (death) holds its last key.
+fn sample(key: &Key, frame: f32, frames: f32, looping: bool) -> (Option<Vec3>, Quat) {
     let n = key.times.len();
     let pick = |v: usize, len: usize| v.min(len.saturating_sub(1));
     if n <= 1 || key.rot.len() <= 1 {
         return (key.pos.first().copied(), key.rot.first().copied().unwrap_or(Quat::IDENTITY));
     }
     let k = key.times.iter().rposition(|&t| t <= frame).unwrap_or(0);
-    let (next, t1) = if k + 1 < n { (k + 1, key.times[k + 1]) } else { (0, frames.max(key.times[k] + 1e-3)) };
+    let (next, t1) = if k + 1 < n {
+        (k + 1, key.times[k + 1])
+    } else if looping {
+        (0, frames.max(key.times[k] + 1e-3))
+    } else {
+        (k, key.times[k])
+    };
     let t0 = key.times[k];
     let a = if t1 > t0 { ((frame - t0) / (t1 - t0)).clamp(0.0, 1.0) } else { 0.0 };
     let rot = key.rot[pick(k, key.rot.len())].slerp(key.rot[pick(next, key.rot.len())], a);
@@ -447,7 +455,7 @@ fn animate_models(time: Res<Time>, mut models: Query<&mut Animated>, mut joints:
         for (bone, key) in clip.tracks.iter().enumerate() {
             let Some(key) = key else { continue };
             let Ok(mut tr) = joints.get_mut(anim.joints[bone]) else { continue };
-            let (pos, rot) = sample(key, t, frames);
+            let (pos, rot) = sample(key, t, frames, anim.looping);
             tr.rotation = rot;
             if let Some(p) = pos {
                 tr.translation = p;

@@ -56,7 +56,7 @@ fn main() -> Result<()> {
             }
             for w in &x.windows {
                 if filter.is_empty() {
-                    println!("{} ({} children)", w.name(), w.children().len());
+                    println!("{} ({} children) exit {} close {:?}", w.name(), w.children().len(), w.flag("exitbutton"), w.str("closeBtnTextureNormal"));
                 } else if w.name().eq_ignore_ascii_case(&filter) {
                     dump(w, 0, 6);
                 }
@@ -70,6 +70,20 @@ fn main() -> Result<()> {
             let t = ue2::texture::read_texture(&h.package, h.export)?;
             println!("{} {}x{} {:?} split9 {:?} masked {} alpha {}", t.name, t.width, t.height, t.format, t.split9, t.masked, t.alpha);
             image::save_buffer(&args[5], &t.rgba, t.width, t.height, image::ColorType::Rgba8)?;
+            Ok(())
+        }
+        Some("anims") => {
+            // anims <pkg> <filter>: sequence names of matching MeshAnimations
+            let pkg = Package::open(&args[2])?;
+            let filter = args.get(3).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+            for i in pkg.exports_of_class("MeshAnimation").collect::<Vec<_>>() {
+                let a = ue2::anim::read_animation(&pkg, i)?;
+                if !a.name.to_ascii_lowercase().contains(&filter) {
+                    continue;
+                }
+                let names: Vec<String> = a.sequences.iter().map(|s| s.name.clone()).collect();
+                println!("{}: {}", a.name, names.join(", "));
+            }
             Ok(())
         }
         Some("export") => {

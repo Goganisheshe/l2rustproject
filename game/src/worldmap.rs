@@ -165,13 +165,14 @@ fn world_map(
     mut menu: ResMut<crate::l2ui::UiClicks>,
     mut env_opened: Local<bool>,
 ) {
+    let closed = menu.take("MinimapWnd", "close");
     let mut toggle = menu.take("Menu", "Map") || keys.just_pressed(KeyCode::KeyM) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::LeftThumb));
     if !*env_opened && std::env::var_os("L2_MAP").is_some() {
         *env_opened = true;
         toggle = true;
     }
     let open = !roots.is_empty();
-    if (toggle && open) || (open && keys.just_pressed(KeyCode::Escape)) {
+    if (toggle && open) || (open && (closed || keys.just_pressed(KeyCode::Escape))) {
         for e in &roots {
             commands.entity(e).despawn();
         }

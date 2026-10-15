@@ -116,7 +116,7 @@ fn skill_window(
         ui.open = !ui.open;
         ui.shown = None;
     }
-    if ui.open && keys.just_pressed(KeyCode::Escape) {
+    if ui.open && (keys.just_pressed(KeyCode::Escape) || menu.take("MagicSkillWnd", "close")) {
         ui.open = false;
     }
     if std::env::var_os("L2_SKILL_WINDOW").is_some() && ui.shown.is_none() && !toggle {

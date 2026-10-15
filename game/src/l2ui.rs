@@ -385,6 +385,41 @@ pub fn spawn_button(commands: &mut Commands, ua: &mut UiAssets, parent: Entity, 
     id
 }
 
+/// The X button closing a window; its click arrives as (`window`, "close").
+pub fn add_close_button(commands: &mut Commands, tex: &mut UiTextures, lib: &mut L2Library, images: &mut Assets<Image>, root: Entity, width: f32, window: &str) {
+    let normal = tex.get("L2UI_CT1.Frames.frames_df_btn_close", lib, images);
+    let over = tex.get("L2UI_CT1.Frames.frames_df_btn_close_over", lib, images).or(normal.clone());
+    let mut b = commands.spawn((
+        Node { position_type: PositionType::Absolute, left: Val::Px(width - 24.0), top: Val::Px(8.0), width: Val::Px(15.0), height: Val::Px(15.0), ..default() },
+        // Above the window's own controls, which are spawned after it.
+        ZIndex(100),
+        ChildOf(root),
+    ));
+    match &normal {
+        Some(t) => {
+            b.insert(image_node(t, None));
+        }
+        None => {
+            b.insert((Text::new("x"), TextFont { font_size: FontSize::Px(12.0), ..default() }));
+        }
+    }
+    let w = window.to_string();
+    let (n_img, o_img) = (normal.map(|t| t.image), over.map(|t| t.image));
+    let (n2, o2) = (n_img.clone(), o_img.clone());
+    b.observe(move |e: On<bevy::picking::events::PointerOver>, mut q: Query<&mut ImageNode>| {
+        if let (Ok(mut img), Some(o)) = (q.get_mut(e.entity), o2.clone()) {
+            img.image = o;
+        }
+    })
+    .observe(move |e: On<bevy::picking::events::PointerOut>, mut q: Query<&mut ImageNode>| {
+        if let (Ok(mut img), Some(n)) = (q.get_mut(e.entity), n2.clone()) {
+            img.image = n;
+        }
+    })
+    .observe(move |_: On<bevy::picking::events::PointerClick>, mut clicks: ResMut<UiClicks>| clicks.0.push((w.clone(), "close".into())));
+    let _ = (n_img, o_img);
+}
+
 /// Labels the Russian client leaves as Korean placeholders or empty (its
 /// scripts fill them from strings this offline build does not have).
 fn label_override(window: &str, ctrl: &str) -> Option<&'static str> {
@@ -480,6 +515,11 @@ pub fn spawn_window(
         ))
         .id();
     make_draggable(commands, root, win.name());
+    // Framed windows with `exitbutton` get the X in the top right corner
+    // (the NPC dialog has one in the client too).
+    if win.flag("exitbutton") || win.name() == "NPCDialogWnd" {
+        add_close_button(commands, tex, lib, images, root, rect.w, win.name());
+    }
     if let Some(t) = tex.get(win.str("backTex"), lib, images) {
         commands.entity(root).insert(image_node(&t, None));
     }
@@ -513,11 +553,15 @@ pub fn spawn_window(
         let id = commands.spawn((ctrl, node, ChildOf(root))).id();
         match e.class.as_str() {
             "Window" => {
+                commands.entity(id).insert(bevy::picking::Pickable::IGNORE);
                 if let Some(t) = tex.get(e.str("backTex"), lib, images) {
                     commands.entity(id).insert(image_node(&t, None));
                 }
             }
             "Texture" => {
+                // Decoration: clicks go through to the buttons under it, as
+                // in the client (the system menu's row bars lie over them).
+                commands.entity(id).insert(bevy::picking::Pickable::IGNORE);
                 if let Some(t) = tex.get(e.str("file"), lib, images) {
                     let mut img = image_node(&t, Some(&e));
                     // Type 1 ("Normal") draws the texture at its own size,
@@ -617,6 +661,8 @@ pub fn spawn_window(
                 let text = e.str("text");
                 let text = if text == "undefined" || text.is_empty() { iface.string(e.int("sysstring")).unwrap_or("") } else { text };
                 let text = label_override(win.name(), n).unwrap_or(text);
+                let (w, c) = (win.name().to_string(), n.to_string());
+                commands.entity(id).observe(move |_: On<bevy::picking::events::PointerClick>, mut clicks: ResMut<UiClicks>| clicks.0.push((w.clone(), c.clone())));
                 commands.entity(id).insert((
                     CtrlText,
                     Text::new(text),

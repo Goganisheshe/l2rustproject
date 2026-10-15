@@ -43,7 +43,7 @@ fn main() {
     }))
     .add_plugins((input::InputPlugin, l2assets::L2AssetsPlugin, skinned::SkinnedPlugin, effects::EffectsPlugin))
     .add_plugins(gamedata::GameDataPlugin)
-    .add_systems(Update, debug_screenshot)
+    .add_systems(Update, (debug_screenshot, debug_clicks))
     .add_systems(Startup, cyrillic_font);
     // Modes: L2_WORLD = world viewer, L2_MODEL = model viewer; default = the game.
     if let Ok(tiles) = std::env::var("L2_WORLD") {
@@ -83,6 +83,46 @@ fn debug_screenshot(
     }
     if t > at + step * count as f32 + 2.0 {
         exit.write(AppExit::Success);
+    }
+}
+
+/// Tests: `L2_CLICKS="t:x,y;t:x,y"` clicks the mouse at logical window
+/// position (x, y) t seconds in, through the picking pointer, so UI clicks
+/// can be checked without touching the real mouse.
+fn debug_clicks(
+    time: Res<Time>,
+    window: Query<Entity, With<bevy::window::PrimaryWindow>>,
+    mut input: MessageWriter<bevy::picking::pointer::PointerInput>,
+    mut done: Local<Vec<(f32, Vec2, u8)>>,
+    mut parsed: Local<bool>,
+) {
+    use bevy::picking::pointer::{Location, PointerAction, PointerButton, PointerId, PointerInput};
+    if !*parsed {
+        *parsed = true;
+        let spec = std::env::var("L2_CLICKS").unwrap_or_default();
+        for item in spec.split(';').filter(|s| !s.is_empty()) {
+            let Some((t, xy)) = item.split_once(':') else { continue };
+            let v: Vec<f32> = xy.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if let (Ok(t), [x, y]) = (t.trim().parse::<f32>(), v.as_slice()) {
+                done.push((t, Vec2::new(*x, *y), 0));
+            }
+        }
+    }
+    let Ok(win) = window.single() else { return };
+    let Some(target) = bevy::camera::RenderTarget::Window(bevy::window::WindowRef::Primary).normalize(Some(win)) else { return };
+    let now = time.elapsed_secs();
+    for (t, pos, stage) in done.iter_mut() {
+        if now < *t || *stage > 2 {
+            continue;
+        }
+        let location = Location { target: target.clone(), position: *pos };
+        let action = match *stage {
+            0 => PointerAction::Move { delta: Vec2::ZERO },
+            1 => PointerAction::Press(PointerButton::Primary),
+            _ => PointerAction::Release(PointerButton::Primary),
+        };
+        input.write(PointerInput::new(PointerId::Mouse, location, action));
+        *stage += 1;
     }
 }
 

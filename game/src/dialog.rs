@@ -330,12 +330,13 @@ fn dialog_input(
     mut dialog: ResMut<Dialog>,
     hero: Single<&Transform, With<Hero>>,
     npcs: Query<&Transform, (With<Npc>, Without<Hero>)>,
+    mut clicks: ResMut<crate::l2ui::UiClicks>,
 ) {
     if !dialog.is_open() {
         return;
     }
     let far = dialog.npc.is_some_and(|npc| npcs.get(npc).map_or(true, |t| t.translation.distance(hero.translation) > 8.0));
-    if far || keys.just_pressed(KeyCode::Escape) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::East)) {
+    if far || clicks.take("NPCDialogWnd", "close") || keys.just_pressed(KeyCode::Escape) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::East)) {
         dialog.close();
         return;
     }
@@ -783,7 +784,7 @@ fn quest_window(
     let toggle = by_env || clicks.take("Menu", "Quest") || (alt && keys.just_pressed(KeyCode::KeyU));
     if toggle {
         *open = !*open;
-    } else if *open && keys.just_pressed(KeyCode::Escape) {
+    } else if *open && (keys.just_pressed(KeyCode::Escape) || clicks.take("QuestTreeWnd", "close")) {
         *open = false;
     } else if !(*open && qlog.is_changed()) {
         return;

@@ -593,6 +593,9 @@ fn inventory_window(
         *opened_by_env = true;
         ui.open = true;
     }
+    if menu.take("InventoryWnd", "close") {
+        ui.open = false;
+    }
     let toggle = menu.take("Menu", "Inventory") || keys.just_pressed(KeyCode::KeyI) || gamepads.iter().any(|g| g.just_pressed(GamepadButton::Select));
     if toggle {
         ui.open = !ui.open;

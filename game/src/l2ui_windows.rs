@@ -17,7 +17,15 @@ pub struct L2UiWindowsPlugin;
 impl Plugin for L2UiWindowsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StatusOpen>()
-            .add_systems(Update, (inventory_wnd, fill_inventory, status_wnd, fill_status, system_menu).chain().run_if(in_state(Phase::InWorld)));
+            .init_resource::<OptionsOpen>()
+            .init_resource::<HelpOpen>()
+            .init_resource::<GameOptions>()
+            .add_systems(
+                Update,
+                (inventory_wnd, fill_inventory, status_wnd, fill_status, system_menu, options_window, help_window, apply_options)
+                    .chain()
+                    .run_if(in_state(Phase::InWorld)),
+            );
     }
 }
 
@@ -32,6 +40,7 @@ fn system_menu(
     mut log: ResMut<crate::rpg::Log>,
     mut exit: MessageWriter<AppExit>,
     mut env_done: Local<bool>,
+    (mut options, mut help): (ResMut<OptionsOpen>, ResMut<HelpOpen>),
 ) {
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let open = find_root(&roots, "SystemMenuWnd");
@@ -57,13 +66,217 @@ fn system_menu(
             }
         }
     }
-    if clicks.take("SystemMenuWnd", "btnQuit") {
-        exit.write(AppExit::Success);
+    // A row is clicked by its icon (btnX) or its label (txtX).
+    let row = |c: &str| -> &'static str {
+        match c {
+            "btnQuit" | "txtQuit" => "quit",
+            "btnRestart" | "txtRestart" => "restart",
+            "btnOption" | "txtOption" => "options",
+            "btnHelpHtml" | "txtHelpHtml" => "help",
+            "btnArchive" | "txtArchive" => "Архив",
+            "btnMovieCapture" | "txtMovieRec" => "Запись видео",
+            "btnPersonalConnections" | "txtPersonalConnections" => "Контакты",
+            "btnPost" | "txtPost" => "Почтовый ящик",
+            "btnBBS" | "txtBBS" => "Форум",
+            "btnMacro" | "txtMacro" => "Макросы",
+            "btnPetition" | "txtPetition" => "Петиция",
+            "btnHomepage" | "txtHomepage" => "Сайт игры",
+            "btn24hz" | "txt24hz" => "24Hz",
+            "close" => "close",
+            _ => "",
+        }
+    };
+    let picked: Vec<&str> = clicks.0.iter().filter(|(w, _)| w == "SystemMenuWnd").map(|(_, c)| row(c)).filter(|r| !r.is_empty()).collect();
+    clicks.0.retain(|(w, _)| w != "SystemMenuWnd");
+    let open_menu = find_root(&roots, "SystemMenuWnd");
+    for action in picked {
+        if let Some(e) = open_menu {
+            commands.entity(e).despawn();
+        }
+        match action {
+            "quit" => {
+                exit.write(AppExit::Success);
+            }
+            // Back to the character select: the game saves on exit and
+            // starts again at the character list.
+            "restart" => {
+                if let Ok(exe) = std::env::current_exe() {
+                    let mut cmd = std::process::Command::new(exe);
+                    cmd.env("L2_LOBBY", "1");
+                    for k in ["L2_CLASS", "L2_CONTINUE", "L2_SCREENSHOT", "L2_INVENTORY", "L2_STATUS", "L2_SYSMENU", "L2_MAP", "L2_QUESTS", "L2_TALK", "L2_DIE"] {
+                        cmd.env_remove(k);
+                    }
+                    if let Ok(dir) = std::env::current_dir() {
+                        cmd.current_dir(dir);
+                    }
+                    if cmd.spawn().is_ok() {
+                        exit.write(AppExit::Success);
+                    } else {
+                        log.push("Не удалось перезапустить игру.");
+                    }
+                }
+            }
+            "options" => options.0 = true,
+            "help" => help.0 = true,
+            "close" => {}
+            other => log.push(format!("{other}: недоступно в офлайн-режиме.")),
+        }
     }
-    for (_, c) in clicks.0.iter().filter(|(w, c)| w == "SystemMenuWnd" || (w == "Menu" && matches!(c.as_str(), "Action" | "Clan"))) {
-        log.push(format!("{c}: not available offline."));
+    for (_, c) in clicks.0.iter().filter(|(w, c)| w == "Menu" && matches!(c.as_str(), "Action" | "Clan")) {
+        let name = if c == "Action" { "Действия" } else { "Клан" };
+        log.push(format!("{name}: недоступно в офлайн-режиме."));
     }
-    clicks.0.retain(|(w, c)| w != "SystemMenuWnd" && !(w == "Menu" && matches!(c.as_str(), "Action" | "Clan")));
+    clicks.0.retain(|(w, c)| !(w == "Menu" && matches!(c.as_str(), "Action" | "Clan")));
+}
+
+#[derive(Resource, Default)]
+pub struct OptionsOpen(pub bool);
+
+#[derive(Resource, Default)]
+pub struct HelpOpen(pub bool);
+
+/// Settings changed in the options window.
+#[derive(Resource)]
+pub struct GameOptions {
+    pub fullscreen: bool,
+    pub ui_scale: f32,
+}
+
+impl Default for GameOptions {
+    fn default() -> Self {
+        Self { fullscreen: false, ui_scale: 1.0 }
+    }
+}
+
+#[derive(Component)]
+struct OptionsRoot;
+
+#[derive(Component)]
+struct HelpRoot;
+
+/// The system menu's "Настройки": screen mode and interface scale.
+#[allow(clippy::too_many_arguments)]
+fn options_window(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut open: ResMut<OptionsOpen>,
+    mut opts: ResMut<GameOptions>,
+    mut ua: crate::l2ui::UiAssets,
+    mut clicks: ResMut<crate::l2ui::UiClicks>,
+    roots: Query<Entity, With<OptionsRoot>>,
+    mut shown: Local<Option<(bool, i32)>>,
+) {
+    if clicks.take("OptionWnd", "close") || clicks.take("OptionWnd", "ok") || (open.0 && keys.just_pressed(KeyCode::Escape)) {
+        open.0 = false;
+    }
+    if clicks.take("OptionWnd", "fullscreen") {
+        opts.fullscreen = !opts.fullscreen;
+    }
+    if clicks.take("OptionWnd", "smaller") {
+        opts.ui_scale = (opts.ui_scale - 0.1).max(0.7);
+    }
+    if clicks.take("OptionWnd", "bigger") {
+        opts.ui_scale = (opts.ui_scale + 0.1).min(1.6);
+    }
+    let state = (opts.fullscreen, (opts.ui_scale * 100.0).round() as i32);
+    if !open.0 {
+        for e in &roots {
+            commands.entity(e).despawn();
+        }
+        *shown = None;
+        return;
+    }
+    if *shown == Some(state) && !roots.is_empty() {
+        return;
+    }
+    *shown = Some(state);
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    let root = crate::l2ui::spawn_frame(&mut commands, &mut ua, "OptionWnd", "Настройки", Vec2::new(280.0, 170.0));
+    commands.entity(root).insert(OptionsRoot);
+    crate::l2ui::add_close_button(&mut commands, &mut ua.tex, &mut ua.lib, &mut ua.images, root, 280.0, "OptionWnd");
+    let text = |commands: &mut Commands, s: String, y: f32| {
+        commands.spawn((
+            Text::new(s),
+            TextFont { font_size: FontSize::Px(12.0), ..default() },
+            TextColor(Color::srgb(0.85, 0.82, 0.75)),
+            Node { position_type: PositionType::Absolute, left: Val::Px(16.0), top: Val::Px(y), ..default() },
+            ChildOf(root),
+        ));
+    };
+    let white = Color::WHITE;
+    text(&mut commands, "Полноэкранный режим".into(), 48.0);
+    let label = if opts.fullscreen { "Вкл" } else { "Выкл" };
+    crate::l2ui::spawn_button(&mut commands, &mut ua, root, Vec2::new(184.0, 42.0), Vec2::new(80.0, 25.0), label, white, "OptionWnd", "fullscreen");
+    text(&mut commands, format!("Масштаб интерфейса: {}%", state.1), 86.0);
+    crate::l2ui::spawn_button(&mut commands, &mut ua, root, Vec2::new(184.0, 80.0), Vec2::new(38.0, 25.0), "-", white, "OptionWnd", "smaller");
+    crate::l2ui::spawn_button(&mut commands, &mut ua, root, Vec2::new(226.0, 80.0), Vec2::new(38.0, 25.0), "+", white, "OptionWnd", "bigger");
+    crate::l2ui::spawn_button(&mut commands, &mut ua, root, Vec2::new(184.0, 128.0), Vec2::new(80.0, 27.0), "OK", white, "OptionWnd", "ok");
+}
+
+fn apply_options(opts: Res<GameOptions>, mut windows: Query<&mut Window>, mut scale: ResMut<UiScale>) {
+    if !opts.is_changed() {
+        return;
+    }
+    if let Ok(mut w) = windows.single_mut() {
+        let mode = if opts.fullscreen {
+            bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Current)
+        } else {
+            bevy::window::WindowMode::Windowed
+        };
+        if w.mode != mode {
+            w.mode = mode;
+        }
+    }
+    if (scale.0 - opts.ui_scale).abs() > 0.001 {
+        scale.0 = opts.ui_scale;
+    }
+}
+
+/// The system menu's "Помощь": the controls.
+fn help_window(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut open: ResMut<HelpOpen>,
+    mut ua: crate::l2ui::UiAssets,
+    mut clicks: ResMut<crate::l2ui::UiClicks>,
+    roots: Query<Entity, With<HelpRoot>>,
+) {
+    if clicks.take("HelpWnd", "close") || (open.0 && keys.just_pressed(KeyCode::Escape)) {
+        open.0 = false;
+    }
+    if !open.0 {
+        for e in &roots {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
+    if !roots.is_empty() {
+        return;
+    }
+    const HELP: &str = "Левый клик по земле: идти\n\
+Клик по монстру: цель, второй клик: атака\n\
+Клик по NPC: подойти и поговорить\n\
+F / X: атаковать цель, Tab: ближайшая цель\n\
+1-9: умения на панели, V: сесть / встать\n\
+Z: подобрать предметы\n\
+I: инвентарь, K: умения, Alt+T: персонаж\n\
+Alt+U: квесты, M: карта, Alt+X: меню\n\
+C: смена профессии, F5: сохранить\n\
+Правая кнопка мыши: поворот камеры, колесо: зум\n\
+Esc: закрыть окно";
+    let size = Vec2::new(340.0, 260.0);
+    let root = crate::l2ui::spawn_frame(&mut commands, &mut ua, "HelpWnd", "Помощь", size);
+    commands.entity(root).insert(HelpRoot);
+    crate::l2ui::add_close_button(&mut commands, &mut ua.tex, &mut ua.lib, &mut ua.images, root, size.x, "HelpWnd");
+    commands.spawn((
+        Text::new(HELP),
+        TextFont { font_size: FontSize::Px(12.0), ..default() },
+        TextColor(Color::srgb(0.85, 0.82, 0.75)),
+        Node { position_type: PositionType::Absolute, left: Val::Px(16.0), top: Val::Px(40.0), width: Val::Px(size.x - 32.0), ..default() },
+        ChildOf(root),
+    ));
 }
 
 fn screen(windows: &Query<&Window>) -> Vec2 {
@@ -247,6 +460,9 @@ fn status_wnd(
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     if clicks.take("Menu", "Character") || alt && keys.just_pressed(KeyCode::KeyT) {
         open.0 = !open.0;
+    }
+    if clicks.take("DetailStatusWndClassic", "close") || (open.0 && keys.just_pressed(KeyCode::Escape)) {
+        open.0 = false;
     }
     if !*env_done && std::env::var_os("L2_STATUS").is_some() {
         *env_done = true;

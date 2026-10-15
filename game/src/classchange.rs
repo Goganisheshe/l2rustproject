@@ -98,7 +98,7 @@ fn class_change(
             }
         }
     }
-    if clicks.take("ClassChangeWnd", "later") {
+    if clicks.take("ClassChangeWnd", "later") || clicks.take("ClassChangeWnd", "close") {
         ui.open = false;
     }
     let clicked = (0..options.len()).find(|i| clicks.take("ClassChangeWnd", &format!("class{i}")));
@@ -157,6 +157,7 @@ fn class_change(
         let size = Vec2::new(260.0, 96.0 + n * 30.0);
         let root = crate::l2ui::spawn_frame(&mut commands, &mut ua, "ClassChangeWnd", "Смена профессии", size);
         commands.entity(root).insert(ClassChangeRoot);
+        crate::l2ui::add_close_button(&mut commands, &mut ua.tex, &mut ua.lib, &mut ua.images, root, size.x, "ClassChangeWnd");
         commands.spawn((
             Text::new(format!("Текущая профессия: {}", dp.class_name(class))),
             TextFont { font_size: FontSize::Px(12.0), ..default() },
