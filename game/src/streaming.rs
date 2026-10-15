@@ -19,7 +19,6 @@ use ue2::ObjectRef;
 
 use crate::l2assets::{to_image, MeshPart, UU_TO_M};
 
-const DEFAULT_CLIENT_DIR: &str = "G:/visery/l2-client";
 /// Baked terrain texture resolution per tile.
 const TERRAIN_TEXELS: usize = 2048;
 /// Unreal units per map tile.
@@ -109,7 +108,7 @@ pub struct TileStreamPlugin;
 
 impl Plugin for TileStreamPlugin {
     fn build(&self, app: &mut App) {
-        let root = std::env::var_os("L2_CLIENT_DIR").map(PathBuf::from).unwrap_or_else(|| DEFAULT_CLIENT_DIR.into());
+        let root = crate::paths::client_dir();
         let (req_tx, req_rx) = channel::<String>();
         let (res_tx, res_rx) = channel::<PreparedTile>();
         std::thread::Builder::new()

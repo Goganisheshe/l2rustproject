@@ -1,14 +1,13 @@
 //! Server-side game data, imported from the L2J Mobius Classic datapack
 //! (Classic 3.0 The Kamael), whose world matches this client's map tiles: NPC templates, spawns, player class templates and
-//! the experience table. Point `L2_DATAPACK` at its `dist/game/data` folder.
+//! the experience table. Point `L2_DATAPACK` or `l2survivor.cfg`
+//! at its `dist/game/data` folder (see `paths.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 use rand::Rng;
-
-const DEFAULT_DATAPACK: &str = "G:/visery/l2-datapack/classic";
 
 #[derive(Debug, Clone)]
 pub struct NpcTemplate {
@@ -173,7 +172,7 @@ impl Datapack {
 
 /// The datapack's `data` folder (`L2_DATAPACK`).
 pub fn datapack_root() -> PathBuf {
-    std::env::var_os("L2_DATAPACK").map(PathBuf::from).unwrap_or_else(|| DEFAULT_DATAPACK.into())
+    crate::paths::datapack_dir()
 }
 
 /// Grand boss lairs from the boss scripts (`scripts/ai/bosses`).
@@ -195,7 +194,7 @@ impl Plugin for DatapackPlugin {
 }
 
 fn load_datapack(mut dp: ResMut<Datapack>, mut book: ResMut<SkillBook>) {
-    let root = std::env::var_os("L2_DATAPACK").map(PathBuf::from).unwrap_or_else(|| DEFAULT_DATAPACK.into());
+    let root = crate::paths::datapack_dir();
     let start = std::time::Instant::now();
     *dp = load(&root);
     *book = load_skills(&root);
