@@ -9,8 +9,98 @@ use crate::{ObjectRef, Package, Reader};
 pub enum EmitterKind {
     Sprite,
     Mesh,
-    /// Beam, trail, spark... not rendered yet.
+    Beam,
+    Trail,
+    /// Spark and anything else, not rendered.
     Other(String),
+}
+
+/// How a beam finds its end (`EBeamEndPointType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeamEnd {
+    /// Where the particle would be after its lifetime (velocity + acceleration).
+    Velocity,
+    /// Along the start velocity, `BeamDistanceRange` long.
+    Distance,
+    /// A random `BeamEndPoints` offset, relative to the emitter.
+    Offset,
+    /// The actor named by `BeamEndPoints[].ActorTag`; here, the effect's target.
+    Actor,
+    /// Like `Offset`, stopped by the first wall (not traced here).
+    TraceOffset,
+    /// `BeamEndPoints` offsets as absolute world locations.
+    OffsetAsAbsolute,
+    /// Like `Distance`, changed at runtime by script.
+    DynamicDistance,
+}
+
+impl BeamEnd {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::Distance,
+            2 => Self::Offset,
+            3 => Self::Actor,
+            4 => Self::TraceOffset,
+            5 => Self::OffsetAsAbsolute,
+            6 => Self::DynamicDistance,
+            _ => Self::Velocity,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BeamEndPoint {
+    pub offset: [[f32; 2]; 3],
+    pub weight: f32,
+}
+
+/// `BeamEmitter` settings. Each particle is one beam.
+#[derive(Debug, Clone)]
+pub struct BeamDef {
+    pub end: BeamEnd,
+    pub distance: [f32; 2],
+    pub end_points: Vec<BeamEndPoint>,
+    /// Texture repeats along the beam / across it.
+    pub u_scale: f32,
+    pub v_scale: f32,
+    /// Sheets rotated around the beam axis; 0 or 1 = one sheet.
+    pub sheets: u32,
+    /// Large bends: control points and their random offset per axis.
+    pub lf_points: u32,
+    pub lf_noise: [[f32; 2]; 3],
+    /// Small bends: polyline points and their random offset per axis.
+    pub hf_points: u32,
+    pub hf_noise: [[f32; 2]; 3],
+    /// Noise may move the end point too.
+    pub noise_moves_end: bool,
+}
+
+/// `ETrailShadeType`: how brightness varies along a trail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrailShade {
+    None,
+    RandomStatic,
+    RandomDynamic,
+    /// Bright at the head, fading to the tail.
+    Linear,
+    /// Each point fades over `PointLifeTime`.
+    PointLife,
+}
+
+/// `TrailEmitter` settings. Each particle drags a ribbon of past positions.
+#[derive(Debug, Clone)]
+pub struct TrailDef {
+    pub shade: TrailShade,
+    /// `PTTL_FollowEmitter`: the head stays on the emitter instead of moving
+    /// with the particle's velocity.
+    pub follow_emitter: bool,
+    pub max_points: u32,
+    /// A new point is added once the head moved this far (UU).
+    pub distance_threshold: f32,
+    /// Two crossed sheets instead of one camera-facing ribbon.
+    pub crossed_sheets: bool,
+    /// Seconds a point lives; 0 = until pushed out by `max_points`.
+    pub point_life: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +140,8 @@ pub struct EmitterDef {
     pub draw_style: u8,
     /// Meshes keep the actor's orientation (`UseRotationFrom`).
     pub rotation_from_actor: bool,
+    pub beam: Option<BeamDef>,
+    pub trail: Option<TrailDef>,
 }
 
 /// Finds the effect class `class_name` in `pkg` and reads its emitters.
@@ -78,6 +170,8 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
     let kind = match class {
         "SpriteEmitter" => EmitterKind::Sprite,
         "MeshEmitter" => EmitterKind::Mesh,
+        "BeamEmitter" => EmitterKind::Beam,
+        "TrailEmitter" => EmitterKind::Trail,
         c => EmitterKind::Other(c.to_string()),
     };
     let f = |n: &str, d: f32| p.float(pkg, n).unwrap_or(d);
@@ -114,6 +208,8 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
     } else {
         Vec::new()
     };
+    let beam = (kind == EmitterKind::Beam).then(|| beam(pkg, p));
+    let trail = (kind == EmitterKind::Trail).then(|| trail(pkg, p));
     EmitterDef {
         name: p
             .get(pkg, "Name")
@@ -154,5 +250,51 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
         ),
         draw_style: p.byte(pkg, "DrawStyle").unwrap_or(3),
         rotation_from_actor: p.byte(pkg, "UseRotationFrom").unwrap_or(0) == 1,
+        beam,
+        trail,
+    }
+}
+
+fn beam(pkg: &Package, p: &Properties) -> BeamDef {
+    let zero = [[0.0; 2]; 3];
+    let end_points = p
+        .struct_array(pkg, "BeamEndPoints")
+        .iter()
+        .map(|s| BeamEndPoint {
+            offset: s.range_vector(pkg, "Offset").unwrap_or(zero),
+            weight: s.float(pkg, "Weight").unwrap_or(1.0),
+        })
+        .collect();
+    let count = |n: &str, d: i32| p.int(pkg, n).unwrap_or(d).max(0) as u32;
+    BeamDef {
+        end: BeamEnd::from_byte(p.byte(pkg, "DetermineEndPointBy").unwrap_or(0)),
+        distance: p.range(pkg, "BeamDistanceRange").unwrap_or([500.0, 500.0]),
+        end_points,
+        u_scale: p.float(pkg, "BeamTextureUScale").unwrap_or(1.0),
+        v_scale: p.float(pkg, "BeamTextureVScale").unwrap_or(1.0),
+        sheets: count("RotatingSheets", 0),
+        lf_points: count("LowFrequencyPoints", 3),
+        lf_noise: p.range_vector(pkg, "LowFrequencyNoiseRange").unwrap_or(zero),
+        hf_points: count("HighFrequencyPoints", 10),
+        hf_noise: p.range_vector(pkg, "HighFrequencyNoiseRange").unwrap_or(zero),
+        noise_moves_end: p.bool(pkg, "NoiseDeterminesEndPoint").unwrap_or(false),
+    }
+}
+
+fn trail(pkg: &Package, p: &Properties) -> TrailDef {
+    let shade = match p.byte(pkg, "TrailShadeType").unwrap_or(0) {
+        1 => TrailShade::RandomStatic,
+        2 => TrailShade::RandomDynamic,
+        3 => TrailShade::Linear,
+        4 => TrailShade::PointLife,
+        _ => TrailShade::None,
+    };
+    TrailDef {
+        shade,
+        follow_emitter: p.byte(pkg, "TrailLocation").unwrap_or(0) == 1,
+        max_points: p.int(pkg, "MaxPointsPerTrail").unwrap_or(100).max(2) as u32,
+        distance_threshold: p.float(pkg, "DistanceThreshold").unwrap_or(2.0).max(0.0),
+        crossed_sheets: p.bool(pkg, "UseCrossedSheets").unwrap_or(false),
+        point_life: p.float(pkg, "PointLifeTime").unwrap_or(0.0).max(0.0),
     }
 }

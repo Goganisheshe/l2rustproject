@@ -432,6 +432,12 @@ pub fn dump_effect(path: &str, class: &str) -> Result<()> {
             e.size_scale,
             e.color_scale.len()
         );
+        if let Some(b) = &e.beam {
+            println!("    beam {b:?}");
+        }
+        if let Some(t) = &e.trail {
+            println!("    trail {t:?}");
+        }
     }
     Ok(())
 }

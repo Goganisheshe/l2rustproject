@@ -15,6 +15,7 @@ mod dialog;
 mod html;
 mod quest;
 mod quests;
+mod ribbon;
 mod effects;
 mod formulas;
 mod gamedata;
