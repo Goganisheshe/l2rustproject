@@ -72,12 +72,20 @@ fn lazy(r: &mut Reader) -> Result<(), Error> {
     Ok(())
 }
 
-struct Section {
-    material: u16,
-    bone: u16,
-    first_face: u16,
-    num_faces: u16,
-    bone_map: Vec<i32>,
+/// `FSkelMeshSection` of a LOD model.
+#[derive(Debug, Clone)]
+pub struct Section {
+    pub material: u16,
+    pub min_stream_index: u16,
+    pub min_wedge: u16,
+    pub max_wedge: u16,
+    pub num_stream_indices: u16,
+    pub bone: u16,
+    pub unknown: u16,
+    pub first_face: u16,
+    pub num_faces: u16,
+    /// Section bone index -> mesh bone index (Lineage only).
+    pub bone_map: Vec<i32>,
 }
 
 fn read_sections(r: &mut Reader, lineage_map: bool) -> Result<Vec<Section>, Error> {
@@ -85,12 +93,12 @@ fn read_sections(r: &mut Reader, lineage_map: bool) -> Result<Vec<Section>, Erro
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let material = r.u16()?;
-        r.u16()?; // min stream index
-        r.u16()?; // min wedge
-        r.u16()?; // max wedge
-        r.u16()?; // num stream indices
+        let min_stream_index = r.u16()?;
+        let min_wedge = r.u16()?;
+        let max_wedge = r.u16()?;
+        let num_stream_indices = r.u16()?;
         let bone = r.u16()?;
-        r.u16()?;
+        let unknown = r.u16()?;
         let first_face = r.u16()?;
         let num_faces = r.u16()?;
         let mut bone_map = Vec::new();
@@ -100,7 +108,18 @@ fn read_sections(r: &mut Reader, lineage_map: bool) -> Result<Vec<Section>, Erro
                 bone_map.push(r.i32()?);
             }
         }
-        out.push(Section { material, bone, first_face, num_faces, bone_map });
+        out.push(Section {
+            material,
+            min_stream_index,
+            min_wedge,
+            max_wedge,
+            num_stream_indices,
+            bone,
+            unknown,
+            first_face,
+            num_faces,
+            bone_map,
+        });
     }
     Ok(out)
 }
@@ -111,6 +130,88 @@ fn read_u16_array(r: &mut Reader) -> Result<Vec<u16>, Error> {
 }
 
 pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, Error> {
+    let Parsed { mut mesh, lod0, source } = parse(pkg, export)?;
+    if !source.wedges.is_empty() && !source.tris.is_empty() {
+        build_from_source(&mut mesh, &source.points, &source.wedges, &source.tris, &source.influences);
+    } else if let Some(lod) = lod0 {
+        build_from_lod(&mut mesh, &lod)?;
+    } else {
+        return Err(Error::Format(format!("{}: no geometry", mesh.name)));
+    }
+    Ok(mesh)
+}
+
+/// Raw LOD 0 of a skeletal mesh, for inspecting meshes whose soft-skinned
+/// part lives only in `SkinningData` (see `l2tool skin`).
+#[derive(Debug, Clone)]
+pub struct LodDump {
+    pub name: String,
+    pub bones: Vec<String>,
+    pub version: i32,
+    pub num_lods: usize,
+    pub num_soft_wedges: i32,
+    pub skinning: Vec<u32>,
+    /// `FSkinPoint`: position and packed normal.
+    pub skin_points: Vec<([f32; 3], u32)>,
+    pub soft: Vec<Section>,
+    pub rigid: Vec<Section>,
+    pub soft_indices: Vec<u16>,
+    pub rigid_indices: Vec<u16>,
+    pub rigid_verts: usize,
+    pub lineage_wedges: usize,
+    /// Full-resolution source arrays (points, wedges, faces, influences).
+    pub source_counts: [usize; 4],
+}
+
+impl LodDump {
+    /// Soft sections exist but neither Lineage wedges nor source data hold
+    /// their vertices: the geometry is only in `SkinningData`.
+    pub fn soft_only_in_skinning(&self) -> bool {
+        !self.soft.is_empty()
+            && self.lineage_wedges == 0
+            && (self.source_counts[1] == 0 || self.source_counts[2] == 0)
+    }
+}
+
+pub fn read_lod_dump(pkg: &Package, export: usize) -> Result<LodDump, Error> {
+    let Parsed { mesh, lod0, source } = parse(pkg, export)?;
+    let lod = lod0.ok_or_else(|| Error::Format(format!("{}: no LOD models", mesh.name)))?;
+    Ok(LodDump {
+        name: mesh.name,
+        bones: mesh.bones.into_iter().map(|b| b.name).collect(),
+        version: source.version,
+        num_lods: source.num_lods,
+        num_soft_wedges: lod.num_soft_wedges,
+        skinning: lod.skinning,
+        skin_points: lod.skin_points,
+        soft: lod.soft,
+        rigid: lod.rigid,
+        soft_indices: lod.soft_indices,
+        rigid_indices: lod.rigid_indices,
+        rigid_verts: lod.rigid_verts.len(),
+        lineage_wedges: lod.lineage_wedges.len(),
+        source_counts: [source.points.len(), source.wedges.len(), source.tris.len(), source.influences.len()],
+    })
+}
+
+/// Full-resolution source data that follows the LOD models.
+#[derive(Default)]
+struct Source {
+    version: i32,
+    num_lods: usize,
+    points: Vec<[f32; 3]>,
+    wedges: Vec<(u16, [f32; 2])>,
+    tris: Vec<([u16; 3], u8)>,
+    influences: Vec<(f32, u16, u16)>,
+}
+
+struct Parsed {
+    mesh: SkeletalMesh,
+    lod0: Option<Lod0>,
+    source: Source,
+}
+
+fn parse(pkg: &Package, export: usize) -> Result<Parsed, Error> {
     let data = pkg.export_data(export);
     let mut r = Reader::new(data);
     Properties::read(pkg, &mut r)?;
@@ -195,7 +296,7 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
     }
     skip_array(&mut r, 48)?; // AttachCoords
 
-    let mut mesh = SkeletalMesh {
+    let mesh = SkeletalMesh {
         name: pkg.full_name(ObjectRef::Export(export)),
         bones,
         materials,
@@ -214,9 +315,22 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
     let n_lods = count(&mut r, 1)?;
     let mut lod0: Option<Lod0> = None;
     for lod in 0..n_lods {
-        skip_array(&mut r, 4)?; // SkinningData
-        skip_array(&mut r, 16)?; // SkinPoints
-        r.i32()?; // NumSoftWedges
+        // SkinningData and SkinPoints are kept for LOD 0 only.
+        let (skinning, skin_points) = if lod == 0 {
+            let n = count(&mut r, 4)?;
+            let skinning: Vec<u32> = (0..n).map(|_| r.u32()).collect::<Result<_, _>>()?;
+            let n = count(&mut r, 16)?;
+            let mut points = Vec::with_capacity(n);
+            for _ in 0..n {
+                points.push((vec3(&mut r)?, r.u32()?));
+            }
+            (skinning, points)
+        } else {
+            skip_array(&mut r, 4)?;
+            skip_array(&mut r, 16)?;
+            (Vec::new(), Vec::new())
+        };
+        let num_soft_wedges = r.i32()?;
         let soft = read_sections(&mut r, lineage)?;
         let rigid = read_sections(&mut r, lineage)?;
         let soft_indices = read_u16_array(&mut r)?;
@@ -253,7 +367,17 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
             }
         }
         if lod == 0 {
-            lod0 = Some(Lod0 { soft, rigid, soft_indices, rigid_indices, rigid_verts, lineage_wedges });
+            lod0 = Some(Lod0 {
+                soft,
+                rigid,
+                soft_indices,
+                rigid_indices,
+                rigid_verts,
+                lineage_wedges,
+                skinning,
+                skin_points,
+                num_soft_wedges,
+            });
         }
     }
 
@@ -292,14 +416,8 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
         influences.push((w, p, b));
     }
 
-    if !wedges.is_empty() && !tris.is_empty() {
-        build_from_source(&mut mesh, &points, &wedges, &tris, &influences);
-    } else if let Some(lod) = lod0 {
-        build_from_lod(&mut mesh, &lod)?;
-    } else {
-        return Err(Error::Format(format!("{}: no geometry", mesh.name)));
-    }
-    Ok(mesh)
+    let source = Source { version, num_lods: n_lods, points, wedges, tris, influences };
+    Ok(Parsed { mesh, lod0, source })
 }
 
 struct LineageWedge {
@@ -317,6 +435,9 @@ struct Lod0 {
     rigid_indices: Vec<u16>,
     rigid_verts: Vec<([f32; 3], [f32; 3], [f32; 2])>,
     lineage_wedges: Vec<LineageWedge>,
+    skinning: Vec<u32>,
+    skin_points: Vec<([f32; 3], u32)>,
+    num_soft_wedges: i32,
 }
 
 /// Keeps the four heaviest influences and normalizes them.

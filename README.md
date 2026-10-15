@@ -145,6 +145,7 @@ cargo run --release -p l2tool -- scan <dir>...             # open every package,
 cargo run --release -p l2tool -- obj <package> <mesh> <out.obj> # static mesh to OBJ
 cargo run --release -p l2tool -- materials <client> <package> <mesh>  # static or skeletal
 cargo run --release -p l2tool -- bones <client> <package> <skeletal mesh>
+cargo run --release -p l2tool -- skin <client> <out dir> [filter] # dump meshes with geometry only in SkinningData
 cargo run --release -p l2tool -- alpha <client> <package> <material>
 cargo run --release -p l2tool -- dat <client>                # decode skillgrp/npcgrp/... and summarize
 cargo run --release -p l2tool -- props <package> <export>     # tagged properties
@@ -175,7 +176,8 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
 - Coverage over the whole client: 1441/1442 packages, 75 434/75 434 textures,
   15 276/15 276 static meshes, 11 489/11 517 skeletal meshes, 1 863/1 863
   animations. The 28 skeletal meshes left keep soft-skinned geometry only in
-  `SkinningData`, which is not decoded yet.
+  `SkinningData`, which is not decoded yet; `l2tool skin` dumps them for
+  working out its layout.
 - Bone math: stored child-bone quaternions are conjugated relative to the
   root (ActorX convention). Unreal→Bevy axes: (x, y, z) → (x, z, y),
   quaternions (x, y, z, w) → (−x, −z, −y, w). 1 UU = 1/27 m.
