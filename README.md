@@ -88,10 +88,13 @@ teleports and the quest pages. What is playable:
   (click to equip / use); the character status (Alt+T); the skill window (K;
   hover shows a skill, click learns it or puts it on the bar); NPC dialogs in
   the NPCDialogWnd frame; the map (M) in MinimapWnd with wheel zoom; the
-  restart menu on death; the system menu (Alt+X, "Quit" saves and exits);
-  the quest window (Alt+U); the main menu bar (bottom right, the client's
-  `Icon_DF_MenuWnd_*` buttons); class change in a window drawn with the
-  client's frame art. Windows can be dragged and keep their place.
+  restart menu on death; the system menu (Alt+X: "Перезапуск" returns to the
+  character select, "Настройки" switches fullscreen and the UI scale,
+  "Помощь" lists the controls, "Выход" saves and exits; online services say
+  they are unavailable); the quest window (Alt+U); the main menu bar (bottom
+  right, the client's `Icon_DF_MenuWnd_*` buttons); class change in a window
+  drawn with the client's frame art. Windows can be dragged and keep their
+  place; framed windows have the client's X button.
   Without `interface.xdat` the game falls back to plain panels.
 
 Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
@@ -100,7 +103,8 @@ Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
 `L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`, `L2_MOVE_TO=dx,dz`, `L2_AUTOSHOTS=1`,
 `L2_SIT=1`, `L2_GROUNDLOOT=1` (with `L2_AUTOFIGHT`), `L2_STATUS=1`, `L2_MAP=1`,
 `L2_SYSMENU=1`, `L2_DIE=1` (dies once after 8 s), `L2_LOBBY=1` / `L2_LOBBY=create`,
-`L2_LOBBY_CAM=x,y,z,pitch,yaw` (login view). `L2_CLASS` / `L2_CONTINUE` skip the start screens.
+`L2_LOBBY_CAM=x,y,z,pitch,yaw` (login view), `L2_CLICKS="t:x,y;..."` (clicks
+the UI at logical x, y after t seconds). `L2_CLASS` / `L2_CONTINUE` skip the start screens.
 
 Monsters behave like on the server: only those flagged aggressive in the
 datapack attack on sight, the rest stroll around their spawn point until
