@@ -149,6 +149,25 @@ impl TileStreamer {
         }
     }
 
+    /// Requests a map package by name (the lobby scene `Lobby01`).
+    pub fn request_named(&mut self, name: &str) {
+        if self.requested.insert(name.to_string()) {
+            let _ = self.requests.send(name.to_string());
+        }
+    }
+
+    /// Forgets a loaded map (its entities are despawned by the caller), so it
+    /// can be requested again.
+    pub fn forget(&mut self, name: &str) {
+        self.requested.remove(name);
+        self.loaded.remove(name);
+        self.ground.remove(name);
+    }
+
+    pub fn is_loaded_named(&self, name: &str) -> bool {
+        self.loaded.contains(name)
+    }
+
     /// Requests the tile at a Bevy position and its 8 neighbours.
     pub fn request_around(&mut self, pos: Vec3) {
         let ue = bevy_to_ue(pos);
@@ -520,7 +539,16 @@ fn receive_tiles(
     mut collision: ResMut<crate::collision::CollisionWorld>,
 ) {
     let Ok(tile) = streamer.results.lock().unwrap().try_recv() else { return };
-    collision.add(tile.collision.iter().copied());
+    // Dropped while it was loading (the lobby scene after leaving it).
+    if !streamer.requested.contains(&tile.name) {
+        return;
+    }
+    // The lobby scene sits on top of real world coordinates: it is only a
+    // backdrop, nothing walks on it.
+    let backdrop = tile.name.starts_with("Lobby");
+    if !backdrop {
+        collision.add(tile.collision.iter().copied());
+    }
     let streamer = streamer.as_mut();
     if let Some((mesh, image, field)) = tile.terrain {
         let material = materials.add(StandardMaterial {
@@ -529,7 +557,9 @@ fn receive_tiles(
             ..default()
         });
         commands.spawn((TileEntity(tile.name.clone()), Mesh3d(meshes.add(mesh)), MeshMaterial3d(material)));
-        streamer.ground.insert(tile.name.clone(), field);
+        if !backdrop {
+            streamer.ground.insert(tile.name.clone(), field);
+        }
     }
     for (key, sections) in tile.meshes {
         let parts = sections

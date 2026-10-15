@@ -249,8 +249,11 @@ pub fn template_for_stats(stats: &HeroStats) -> &str {
 }
 
 /// Starting class template for a character-creation entry.
-pub fn template_for(prefix: &str) -> &'static str {
-    match prefix {
+pub fn template_for(class: &crate::character::CharClass) -> &'static str {
+    let mystic = class.name.contains("Mystic");
+    match class.prefix {
+        "MElf" | "FElf" if mystic => "ElvenMystic",
+        "MDarkElf" | "FDarkElf" if mystic => "DarkMystic",
         "MFighter" | "FFighter" => "HumanFighter",
         "MMagic" | "FMagic" => "HumanMystic",
         "MElf" | "FElf" => "ElvenFighter",

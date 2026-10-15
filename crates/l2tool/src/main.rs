@@ -69,6 +69,12 @@ fn main() -> Result<()> {
             image::save_buffer(&args[5], &t.rgba, t.width, t.height, image::ColorType::Rgba8)?;
             Ok(())
         }
+        Some("export") => {
+            // export <pkg> <object> <out>: raw export data (after nothing is stripped)
+            let pkg = Package::open(&args[2])?;
+            let idx = pkg.find_export(&args[3]).with_context(|| format!("no export {}", args[3]))?;
+            Ok(std::fs::write(&args[4], pkg.export_data(idx))?)
+        }
         Some("datdump") => Ok(std::fs::write(&args[3], ue2::dat::read_dat(&args[2])?)?),
         Some("map") => map_info(&args[2], &args[3]),
         Some("bsp") => bsp_probe(&args[2], &args[3]),

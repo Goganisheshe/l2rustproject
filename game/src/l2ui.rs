@@ -298,13 +298,19 @@ fn window_rect(x: &Xdat, win: &Element, screen: Vec2) -> Rect {
 /// art: the large framed background and a title. Returns the root.
 pub fn spawn_frame(commands: &mut Commands, ua: &mut UiAssets, name: &str, title: &str, size: Vec2) -> Entity {
     let screen = ua.screen();
+    let pos = Vec2::new(((screen.x - size.x) / 2.0).round(), ((screen.y - size.y) / 3.0).round());
+    spawn_frame_at(commands, ua, name, title, pos, size)
+}
+
+/// `spawn_frame` at a given screen position.
+pub fn spawn_frame_at(commands: &mut Commands, ua: &mut UiAssets, name: &str, title: &str, pos: Vec2, size: Vec2) -> Entity {
     let root = commands
         .spawn((
             UiWindow(name.into()),
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(((screen.x - size.x) / 2.0).round()),
-                top: Val::Px(((screen.y - size.y) / 3.0).round()),
+                left: Val::Px(pos.x),
+                top: Val::Px(pos.y),
                 width: Val::Px(size.x),
                 height: Val::Px(size.y),
                 ..default()

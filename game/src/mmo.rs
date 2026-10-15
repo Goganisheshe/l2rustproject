@@ -4,14 +4,13 @@
 //! Controls: WASD / left stick move (camera-relative), Q/E or right stick
 //! turn the camera, mouse wheel / triggers zoom, Shift walks.
 
-use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
 
-use crate::character::{find_class, part_spec, weapon_spec, CharClass, CLASSES};
+use crate::character::{part_spec, weapon_spec, CharClass, CLASSES};
 use crate::collision::CollisionWorld;
 use crate::datapack::Datapack;
 use crate::rpg::{spawn_hud, template_for, HeroStats};
@@ -39,7 +38,7 @@ fn start_location(class: &CharClass, dp: &Datapack) -> [f32; 3] {
     }) {
         return p;
     }
-    if let Some(p) = dp.classes.get(template_for(class.prefix)).and_then(|t| t.creation_points.first()) {
+    if let Some(p) = dp.classes.get(template_for(class)).and_then(|t| t.creation_points.first()) {
         return *p;
     }
     race_village(class)
@@ -65,7 +64,12 @@ fn race_village(class: &CharClass) -> [f32; 3] {
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Phase {
+    /// Login screen (lobby.rs).
     #[default]
+    Login,
+    /// Character select.
+    Lobby,
+    /// Character creation.
     Create,
     Loading,
     InWorld,
@@ -73,29 +77,22 @@ pub enum Phase {
 
 #[derive(Resource, Default)]
 pub struct Creation {
+    /// Index into `CLASSES`.
     pub index: usize,
-    shown: Option<usize>,
-    model: Option<Arc<Model>>,
-    weapon: Vec<crate::l2assets::MeshPart>,
+    /// Character name.
+    pub name: String,
+    pub model: Option<Arc<Model>>,
+    pub weapon: Vec<crate::l2assets::MeshPart>,
 }
 
 impl Creation {
-    fn attachments(&self) -> Vec<Attachment> {
+    pub fn attachments(&self) -> Vec<Attachment> {
         if self.weapon.is_empty() {
             return Vec::new();
         }
         vec![Attachment { bone: "Weapon_R_Bone", parts: self.weapon.clone() }]
     }
 }
-
-#[derive(Component)]
-struct Preview;
-
-#[derive(Component)]
-struct CreateUi;
-
-#[derive(Component)]
-struct ClassLine(usize);
 
 #[derive(Component)]
 pub struct Hero {
@@ -167,9 +164,6 @@ impl Plugin for MmoPlugin {
             .insert_resource(Orbit { yaw: 0.0, pitch: -0.35, distance: 7.0 })
             .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.85)))
             .add_systems(Startup, setup)
-            .add_systems(OnEnter(Phase::Create), open_create)
-            .add_systems(Update, create_menu.run_if(in_state(Phase::Create)))
-            .add_systems(OnExit(Phase::Create), close_create)
             .add_systems(OnEnter(Phase::Loading), start_loading)
             .add_systems(Update, wait_loading.run_if(in_state(Phase::Loading)))
             .add_systems(OnEnter(Phase::InWorld), enter_world)
@@ -193,83 +187,21 @@ fn setup(mut commands: Commands) {
     ));
 }
 
-fn open_create(mut commands: Commands, mut c: ResMut<Creation>) {
-    if let Some(i) = std::env::var("L2_CLASS").ok().and_then(|k| find_class(&k)) {
-        c.index = i;
-    }
-    c.shown = None;
-    commands
-        .spawn((
-            CreateUi,
-            Node {
-                position_type: PositionType::Absolute,
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
-                padding: UiRect::left(Val::Px(48.0)),
-                row_gap: Val::Px(4.0),
-                ..default()
-            },
-        ))
-        .with_children(|p| {
-            p.spawn((Text::new("Create character"), TextFont { font_size: FontSize::Px(32.0), ..default() }));
-            for (i, class) in CLASSES.iter().enumerate() {
-                p.spawn((ClassLine(i), Text::new(class.name), TextFont { font_size: FontSize::Px(20.0), ..default() }));
-            }
-            p.spawn((Text::new("Enter / A: start"), TextFont { font_size: FontSize::Px(16.0), ..default() }));
-        });
-}
-
+/// Loads a class's model and starting weapon into `c` (character screens).
 #[allow(clippy::too_many_arguments)]
-fn create_menu(
-    mut commands: Commands,
-    input: Res<PlayerInput>,
-    mut c: ResMut<Creation>,
-    mut next: ResMut<NextState<Phase>>,
-    mut lines: Query<(&ClassLine, &mut TextColor)>,
-    previews: Query<Entity, With<Preview>>,
-    mut lib: ResMut<L2Library>,
-    mut cache: ResMut<ModelCache>,
-    mut assets: (
-        ResMut<Assets<Mesh>>,
-        ResMut<Assets<StandardMaterial>>,
-        ResMut<Assets<Image>>,
-        ResMut<Assets<SkinnedMeshInverseBindposes>>,
-    ),
+pub fn load_class_model(
+    c: &mut Creation,
+    lib: &mut L2Library,
+    cache: &mut ModelCache,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    bindposes: &mut Assets<SkinnedMeshInverseBindposes>,
 ) {
-    let n = CLASSES.len() as i32;
-    if input.nav != 0 {
-        c.index = (c.index as i32 + input.nav).rem_euclid(n) as usize;
-    }
-    for (line, mut color) in &mut lines {
-        color.0 = if line.0 == c.index { Color::srgb(1.0, 0.85, 0.3) } else { Color::WHITE };
-    }
-    if c.shown != Some(c.index) {
-        c.shown = Some(c.index);
-        for e in &previews {
-            commands.entity(e).despawn();
-        }
-        let class = &CLASSES[c.index];
-        let spec = part_spec(&mut lib, class);
-        let (meshes, materials, images, bindposes) = &mut assets;
-        c.model = cache.load(&mut lib, class.package, &spec, None, meshes, materials, images, bindposes);
-        c.weapon = lib.rigid_mesh("lineageweapons", &weapon_spec(class), meshes, materials, images).unwrap_or_default();
-        let root = commands
-            .spawn((Preview, Transform::from_xyz(1.2, 0.0, 0.0).with_rotation(Quat::from_rotation_y(-FRAC_PI_2)), Visibility::default()))
-            .id();
-        if let Some(model) = &c.model {
-            spawn_model(&mut commands, model, root, "wait_1HS", &c.attachments());
-        }
-    }
-    if input.confirm || std::env::var_os("L2_CLASS").is_some() {
-        next.set(Phase::Loading);
-    }
-}
-
-fn close_create(mut commands: Commands, ui: Query<Entity, Or<(With<CreateUi>, With<Preview>)>>) {
-    for e in &ui {
-        commands.entity(e).despawn();
-    }
+    let class = &CLASSES[c.index];
+    let spec = part_spec(lib, class);
+    c.model = cache.load(lib, class.package, &spec, None, meshes, materials, images, bindposes);
+    c.weapon = lib.rigid_mesh("lineageweapons", &weapon_spec(class), meshes, materials, images).unwrap_or_default();
 }
 
 fn start_loading(mut commands: Commands, c: Res<Creation>, dp: Res<Datapack>, mut streamer: ResMut<TileStreamer>) {
@@ -372,11 +304,11 @@ fn enter_world(
         Some(model) => spawn_model(&mut commands, model, hero, "wait_1HS", &c.attachments()),
         None => hero,
     };
-    let template = dp.classes.get(template_for(class.prefix)).cloned().unwrap_or_default();
+    let template = dp.classes.get(template_for(class)).cloned().unwrap_or_default();
     let mut stats = HeroStats::new(template);
     stats.respawn = pos;
     stats.sitting = std::env::var_os("L2_SIT").is_some();
-    stats.class_key = template_for(class.prefix).to_string();
+    stats.class_key = template_for(class).to_string();
     // L2_LEVEL=<n> starts at that level (tests).
     if let Some(l) = std::env::var("L2_LEVEL").ok().and_then(|v| v.parse::<u32>().ok()) {
         stats.exp = dp.exp.get(l as usize).copied().unwrap_or(0);

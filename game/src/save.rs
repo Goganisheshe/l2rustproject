@@ -1,6 +1,7 @@
-//! Save game: the hero's class, progress, position, inventory, skills and
-//! quests in `saves/hero.json` (or `L2_SAVE`). Saved every minute, on F5 and
-//! on exit; C / gamepad Y on the character screen continues.
+//! Save games: one file per character, `saves/char<N>.json` (N = the slot on
+//! the character select screen; `L2_SAVE` forces one file). Each holds the
+//! hero's name, class, progress, position, inventory, skills and quests.
+//! Saved every minute, on F5 and on exit.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -19,6 +20,8 @@ use crate::streaming::{bevy_to_ue, ue_to_bevy};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SaveGame {
     pub version: u32,
+    #[serde(default)]
+    pub name: String,
     /// Index into `CLASSES` (race, sex and look).
     pub class_index: usize,
     pub class_id: u32,
@@ -40,18 +43,53 @@ pub struct SaveGame {
     pub quests: BTreeMap<u32, (u8, u32, HashMap<String, i64>)>,
 }
 
-fn path() -> PathBuf {
-    std::env::var_os("L2_SAVE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("saves/hero.json"))
+/// Character slots on the select screen, as in the client.
+pub const SLOTS: usize = 7;
+
+/// Slot of the character being played.
+pub static SLOT: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+fn slot_path(slot: usize) -> PathBuf {
+    PathBuf::from(format!("saves/char{slot}.json"))
 }
 
-pub fn read() -> Option<SaveGame> {
-    let src = std::fs::read_to_string(path()).ok()?;
-    serde_json::from_str(&src).map_err(|e| warn!("save file: {e}")).ok()
+fn path() -> PathBuf {
+    std::env::var_os("L2_SAVE").map(PathBuf::from).unwrap_or_else(|| slot_path(*SLOT.lock().unwrap()))
+}
+
+fn read_file(p: &std::path::Path) -> Option<SaveGame> {
+    let src = std::fs::read_to_string(p).ok()?;
+    serde_json::from_str(&src).map_err(|e| warn!("save file {}: {e}", p.display())).ok()
+}
+
+/// The characters in their slots. A save from before slots
+/// (`saves/hero.json`) becomes the first free slot.
+pub fn list() -> Vec<Option<SaveGame>> {
+    let legacy = PathBuf::from("saves/hero.json");
+    let mut out: Vec<Option<SaveGame>> = (0..SLOTS).map(|i| read_file(&slot_path(i))).collect();
+    if legacy.exists() {
+        if let Some(free) = out.iter().position(|s| s.is_none()) {
+            if std::fs::rename(&legacy, slot_path(free)).is_ok() {
+                out[free] = read_file(&slot_path(free));
+            }
+        }
+    }
+    for s in out.iter_mut().flatten() {
+        if s.name.is_empty() {
+            s.name = "Hero".into();
+        }
+    }
+    out
+}
+
+/// Deletes a character for good.
+pub fn delete(slot: usize) {
+    let _ = std::fs::remove_file(slot_path(slot));
 }
 
 /// A save chosen on the character screen, applied when the hero spawns.
 #[derive(Resource, Default)]
-struct PendingLoad(Option<SaveGame>);
+pub struct PendingLoad(pub Option<SaveGame>);
 
 #[derive(Resource)]
 struct AutoSave(Timer);
@@ -65,7 +103,6 @@ impl Plugin for SavePlugin {
                 std::env::var("L2_AUTOSAVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60.0),
                 TimerMode::Repeating,
             )))
-            .add_systems(Update, continue_game.run_if(in_state(Phase::Create)))
             .add_systems(
                 Update,
                 (restore.before(crate::items::give_starting_items), save_game).chain().run_if(in_state(Phase::InWorld)),
@@ -74,43 +111,13 @@ impl Plugin for SavePlugin {
     }
 }
 
-fn continue_game(
-    keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
-    mut pending: ResMut<PendingLoad>,
-    mut c: ResMut<Creation>,
-    mut next: ResMut<NextState<Phase>>,
-    mut hint: Local<Option<Entity>>,
-    mut commands: Commands,
-    dp: Res<Datapack>,
-) {
-    let wanted = keys.just_pressed(KeyCode::KeyC)
-        || gamepads.iter().any(|g| g.just_pressed(GamepadButton::North))
-        || std::env::var_os("L2_CONTINUE").is_some();
-    if hint.is_none() {
-        let text = match read() {
-            Some(s) => format!("C / Y: continue {} Lv {}", dp.class_name(s.class_id), s.level),
-            None => String::new(),
-        };
-        *hint = Some(
-            commands
-                .spawn((
-                    Text::new(text),
-                    TextFont { font_size: FontSize::Px(18.0), ..default() },
-                    Node { position_type: PositionType::Absolute, bottom: Val::Px(30.0), left: Val::Px(48.0), ..default() },
-                    DespawnOnExit(Phase::Create),
-                ))
-                .id(),
-        );
-    }
-    if !wanted || pending.0.is_some() {
-        return;
-    }
-    let Some(save) = read() else { return };
-    c.index = save.class_index;
+/// Starts playing the character in `slot`.
+pub fn load_slot(slot: usize, save: SaveGame, c: &mut Creation, pending: &mut PendingLoad) {
+    *SLOT.lock().unwrap() = slot;
+    c.index = save.class_index.min(crate::character::CLASSES.len() - 1);
+    c.name = save.name.clone();
     *START_OVERRIDE.lock().unwrap() = Some(save.pos);
     pending.0 = Some(save);
-    next.set(Phase::Loading);
 }
 
 /// Applies a pending save once the hero and its components exist.
@@ -175,6 +182,7 @@ pub fn snapshot(
 ) -> SaveGame {
     SaveGame {
         version: 1,
+        name: c.name.clone(),
         class_index: c.index,
         class_id: stats.template.class_id,
         level: stats.level,

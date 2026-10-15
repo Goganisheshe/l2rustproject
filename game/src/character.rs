@@ -37,6 +37,11 @@ pub const CLASSES: &[CharClass] = &[
     CharClass { name: "Dwarf (F)", package: "dwarf", prefix: "FDwarf", weapon: "club_m00_wp" },
     CharClass { name: "Kamael (M)", package: "kamael", prefix: "MKamael", weapon: "falchion_m00_wp" },
     CharClass { name: "Kamael (F)", package: "kamael", prefix: "FKamael", weapon: "falchion_m00_wp" },
+    // Elven and dark elven mystics share the race's model.
+    CharClass { name: "Elf Mystic (M)", package: "elf", prefix: "MElf", weapon: "apprentices_rod_m00_wp" },
+    CharClass { name: "Elf Mystic (F)", package: "elf", prefix: "FElf", weapon: "apprentices_rod_m00_wp" },
+    CharClass { name: "Dark Elf Mystic (M)", package: "darkelf", prefix: "MDarkElf", weapon: "apprentices_rod_m00_wp" },
+    CharClass { name: "Dark Elf Mystic (F)", package: "darkelf", prefix: "FDarkElf", weapon: "apprentices_rod_m00_wp" },
 ];
 
 /// Weapon spec for `L2Library::rigid_mesh`: weapon meshes carry no material,

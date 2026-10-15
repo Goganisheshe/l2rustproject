@@ -70,8 +70,17 @@ teleports and the quest pages. What is playable:
 - Bosses: raid bosses with their escorts, grand bosses in their lairs (Baium
   wakes from his statue). Their HP and attack are scaled for one player:
   `L2_BOSS_HP` (default 0.05) and `L2_BOSS_ATK` (0.6).
-- Saving: every minute, on F5 and on exit to `saves/hero.json` (`L2_SAVE`);
-  C / gamepad Y on the character screen continues.
+- Start screens (`game/src/lobby.rs`): the login screen in front of the
+  painted backdrop of the client's lobby map (`Lobby01_Classic.unr`) with the
+  Classic logo and a single "Войти" button (no account, no server list); the
+  character select in the lobby hall with the character on the stage and up
+  to 7 characters (create, delete with confirmation, start); character
+  creation: race, fighter / mystic, gender, name, base stats from the
+  datapack. The client draws these screens with Flash movies, so their layout
+  is rebuilt with its logo, frame and button art.
+- Saving: one file per character, `saves/char<N>.json` (`L2_SAVE` forces one
+  file), every minute, on F5 and on exit. An old `saves/hero.json` becomes
+  the first character.
 - Interface: the windows come from the client's own `system/interface.xdat`
   (layout, textures, Split9 frames, default positions) with labels from
   `sysstring-ru.dat` (`game/src/l2ui*.rs`): status, target, chat and shortcut
@@ -90,7 +99,8 @@ Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
 `L2_TALK=<npc id>` with `L2_BYPASS="cmd|cmd"`, `L2_CONTINUE=1`,
 `L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`, `L2_MOVE_TO=dx,dz`, `L2_AUTOSHOTS=1`,
 `L2_SIT=1`, `L2_GROUNDLOOT=1` (with `L2_AUTOFIGHT`), `L2_STATUS=1`, `L2_MAP=1`,
-`L2_SYSMENU=1`, `L2_DIE=1` (dies once after 8 s).
+`L2_SYSMENU=1`, `L2_DIE=1` (dies once after 8 s), `L2_LOBBY=1` / `L2_LOBBY=create`,
+`L2_LOBBY_CAM=x,y,z,pitch,yaw` (login view). `L2_CLASS` / `L2_CONTINUE` skip the start screens.
 
 Monsters behave like on the server: only those flagged aggressive in the
 datapack attack on sight, the rest stroll around their spawn point until
