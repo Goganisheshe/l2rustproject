@@ -1,0 +1,6 @@
+# Copy to l2survivor.cfg (next to Cargo.toml, where you run `cargo run`)
+# and set your own paths. The environment variables L2_CLIENT_DIR and
+# L2_DATAPACK override these values.
+
+client = G:/visery/l2-client
+datapack = G:/visery/l2-datapack/classic

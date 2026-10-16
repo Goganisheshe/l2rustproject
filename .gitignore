@@ -1,3 +1,6 @@
 /target
 /out
 saves/
+__pycache__/
+*.pyc
+l2survivor.cfg

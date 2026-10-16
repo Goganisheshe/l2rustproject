@@ -6,6 +6,7 @@ mod l2ui;
 mod l2ui_bind;
 mod l2ui_windows;
 mod lobby;
+mod paths;
 mod character;
 mod classchange;
 mod collision;

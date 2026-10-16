@@ -4,7 +4,9 @@ Lineage II rebuilt in Rust (Bevy) as an offline game, using the original
 client's models, textures and animations, with gamepad support.
 
 The original client is read-only input. By default it is expected at
-`G:/visery/l2-client`; override with `L2_CLIENT_DIR`.
+`G:/visery/l2-client`. Set your own paths once in `l2survivor.cfg`
+(copy `l2survivor.cfg.example`, keys `client` and `datapack`), or with the
+environment variables `L2_CLIENT_DIR` / `L2_DATAPACK`, which take priority.
 
 ## Layout
 
