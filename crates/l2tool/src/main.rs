@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use ue2::Package;
 
+mod skin;
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -11,6 +13,7 @@ fn main() -> Result<()> {
         Some("obj") => obj(&args[2], &args[3], &args[4]),
         Some("materials") => materials(&args[2], &args[3], &args[4]),
         Some("bones") => skel_bones(&args[2], &args[3], &args[4]),
+        Some("skin") => skin::run(&args[2], &args[3], args.get(4).map(String::as_str)),
         Some("alpha") => mat_alpha(&args[2], &args[3], &args[4]),
         Some("props") => dump_props(&args[2], &args[3]),
         Some("effect") => dump_effect(&args[2], &args[3]),
@@ -107,7 +110,8 @@ fn main() -> Result<()> {
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
-             obj <pkg> <mesh> <out.obj> | materials <client> <pkg> <mesh> | hex <pkg> <export> [n]"
+             obj <pkg> <mesh> <out.obj> | materials <client> <pkg> <mesh> | \
+             skin <client> <out dir> [mesh filter] | hex <pkg> <export> [n]"
         ),
     }
 }
