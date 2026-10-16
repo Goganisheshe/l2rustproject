@@ -146,6 +146,12 @@ pub fn ground_point(origin: Vec3, dir: Vec3, streamer: &TileStreamer, world: &Co
     }
 }
 
+/// Camera turn per pixel of mouse movement with the right button held.
+const MOUSE_RADIANS_PER_PIXEL: f32 = 0.005;
+/// Camera pitch limits: from nearly straight down to a little below the hero.
+const MIN_PITCH: f32 = -1.45;
+const MAX_PITCH: f32 = 0.3;
+
 /// Third-person orbit camera.
 #[derive(Resource)]
 struct Orbit {
@@ -494,7 +500,7 @@ fn orbit_camera(
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     mut orbit: ResMut<Orbit>,
     world: Res<CollisionWorld>,
     hero: Single<&Transform, With<Hero>>,
@@ -518,12 +524,14 @@ fn orbit_camera(
         }
         zoom += (pad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0) - pad.get(GamepadButton::RightTrigger2).unwrap_or(0.0)) * dt * 8.0;
     }
+    // Keys and sticks turn at a rate (per second); the mouse turns by a fixed
+    // angle per pixel moved, whatever the frame rate.
+    let mut mouse_turn = Vec2::ZERO;
     if mouse.pressed(MouseButton::Right) {
-        turn -= motion.delta.x * 0.15;
-        tilt -= motion.delta.y * 0.15;
+        mouse_turn = -motion.delta * MOUSE_RADIANS_PER_PIXEL;
     }
-    orbit.yaw += turn * 2.0 * dt;
-    orbit.pitch = (orbit.pitch + tilt * 1.5 * dt).clamp(-1.3, 0.3);
+    orbit.yaw += turn * 2.0 * dt + mouse_turn.x;
+    orbit.pitch = (orbit.pitch + tilt * 1.5 * dt + mouse_turn.y).clamp(MIN_PITCH, MAX_PITCH);
     orbit.distance = (orbit.distance + zoom).clamp(2.0, 30.0);
     let focus = hero.translation + Vec3::Y * 1.5;
     let back = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0) * Vec3::Z;

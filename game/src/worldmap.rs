@@ -153,7 +153,7 @@ fn radar(hero: Single<&Transform, With<Hero>>, mut img: Query<&mut Node, With<Ra
 fn world_map(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     art: Res<MapArt>,
     hero: Single<&Transform, With<Hero>>,
     roots: Query<Entity, With<WorldMapRoot>>,
