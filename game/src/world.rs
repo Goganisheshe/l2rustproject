@@ -74,7 +74,7 @@ fn place_camera(tiles: Res<Tiles>, streamer: Res<TileStreamer>, mut cam: Single<
 fn fly(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     mut cam: Single<(&mut Transform, &mut FlyCam)>,
 ) {
     let dt = time.delta_secs();

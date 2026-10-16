@@ -500,7 +500,7 @@ fn orbit_camera(
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     mut orbit: ResMut<Orbit>,
     world: Res<CollisionWorld>,
     hero: Single<&Transform, With<Hero>>,

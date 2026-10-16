@@ -568,7 +568,7 @@ pub struct ItemClick(pub Option<u32>);
 fn inventory_window(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     input: Res<PlayerInput>,
     data: Res<ItemData>,
     mut ui: ResMut<InventoryUi>,

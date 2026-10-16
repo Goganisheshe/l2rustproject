@@ -99,7 +99,7 @@ pub fn learn(entry: &TreeEntry, stats: &mut HeroStats, inv: &mut Inventory, skil
 fn skill_window(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     input: Res<PlayerInput>,
     book: Res<SkillBook>,
     dp: Res<Datapack>,
