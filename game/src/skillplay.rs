@@ -1,9 +1,11 @@
 //! Class skills in the offline game: learning from the datapack skill tree as
-//! the hero levels, a 1–9 hotbar, and casting with the client's animations
-//! and effects. Damage, heals and buffs follow the datapack skill effects.
+//! the hero levels, the hotbar (pages of 12 slots, as the client's shortcut
+//! bar) and casting with the client's animations and effects. Damage, heals
+//! and buffs follow the datapack skill effects.
 //!
-//! Keys 1–9 cast hotbar slots. Gamepad: hold LB + A/B/X/Y for slots 1–4,
-//! hold LT + A/B/X/Y for slots 5–8.
+//! Keys 1–0, -, = cast the first bar's slots, Ctrl+ those the second bar's,
+//! Alt+ those the third's. Gamepad: hold LB + A/B/X/Y for slots 1–4, hold
+//! LT + A/B/X/Y for slots 5–8.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -19,7 +21,38 @@ use crate::mmo::{Hero, Phase};
 use crate::rpg::{award_kill, Buff, HeroStats, Log, Npc, NpcState, Target};
 use crate::skinned::Animated;
 
-pub const HOTBAR: usize = 9;
+/// Slots of one hotbar row (the client's shortcut bar).
+pub const BAR_SLOTS: usize = 12;
+/// Pages of hotbar slots; every visible row shows one page.
+pub const PAGES: usize = 10;
+/// Hotbar slots in all pages.
+pub const HOTBAR: usize = BAR_SLOTS * PAGES;
+/// Hotbar rows on screen at most (the main bar and four more).
+pub const MAX_BARS: usize = 5;
+
+/// Which hotbar rows are shown and the page each one shows.
+#[derive(Resource)]
+pub struct HotbarPages {
+    pub bars: usize,
+    pub pages: [usize; MAX_BARS],
+}
+
+impl Default for HotbarPages {
+    fn default() -> Self {
+        HotbarPages { bars: 1, pages: [0, 1, 2, 3, 4] }
+    }
+}
+
+impl HotbarPages {
+    /// Hotbar index of slot `slot` (0-based) of row `bar`.
+    pub fn index(&self, bar: usize, slot: usize) -> usize {
+        self.pages[bar.min(MAX_BARS - 1)] * BAR_SLOTS + slot
+    }
+}
+
+/// A hotbar slot clicked with the mouse this frame (hotbar index).
+#[derive(Resource, Default)]
+pub struct HotbarPress(pub Option<usize>);
 
 pub struct SkillPlayPlugin;
 
@@ -28,7 +61,9 @@ impl Plugin for SkillPlayPlugin {
         app.add_systems(
             Update,
             (learn_skills, cast_input, run_cast, tick_buffs, update_hotbar).chain().run_if(in_state(Phase::InWorld)),
-        );
+        )
+        .init_resource::<HotbarPages>()
+        .init_resource::<HotbarPress>();
     }
 }
 
@@ -36,8 +71,11 @@ impl Plugin for SkillPlayPlugin {
 pub struct HeroSkills {
     /// Learned skill id -> level.
     pub learned: BTreeMap<u32, u32>,
+    /// Skill per hotbar slot over all pages; 0 is an empty slot. Trailing
+    /// empty slots are left out.
     pub hotbar: Vec<u32>,
-    cooldowns: HashMap<u32, f32>,
+    /// Skill id -> (seconds left, full reuse time).
+    cooldowns: HashMap<u32, (f32, f32)>,
     cast: Option<Cast>,
     last_level: u32,
     last_sp: u64,
@@ -47,7 +85,70 @@ pub struct HeroSkills {
 impl HeroSkills {
     /// Skills from a save game; `learn_skills` resumes from this level / SP.
     pub fn restored(learned: BTreeMap<u32, u32>, hotbar: Vec<u32>, level: u32, sp: u64, class: u32) -> Self {
-        HeroSkills { learned, hotbar, last_level: level, last_sp: sp, last_class: class, ..default() }
+        let mut s = HeroSkills { learned, hotbar, last_level: level, last_sp: sp, last_class: class, ..default() };
+        s.hotbar.truncate(HOTBAR);
+        s.trim();
+        s
+    }
+
+    /// Skill in hotbar slot `i`, 0 when empty.
+    pub fn slot(&self, i: usize) -> u32 {
+        self.hotbar.get(i).copied().unwrap_or(0)
+    }
+
+    /// Puts `id` (0 empties) in hotbar slot `i`.
+    pub fn set_slot(&mut self, i: usize, id: u32) {
+        if i >= HOTBAR {
+            return;
+        }
+        if self.hotbar.len() <= i {
+            self.hotbar.resize(i + 1, 0);
+        }
+        self.hotbar[i] = id;
+        self.trim();
+    }
+
+    /// Puts `id` in the first empty slot unless it is on the hotbar already.
+    /// False when every slot is taken.
+    pub fn add_to_hotbar(&mut self, id: u32) -> bool {
+        if self.on_hotbar(id) {
+            return true;
+        }
+        match (0..HOTBAR).find(|i| self.slot(*i) == 0) {
+            Some(i) => {
+                self.set_slot(i, id);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Takes `id` off every hotbar slot.
+    pub fn remove_from_hotbar(&mut self, id: u32) {
+        for s in self.hotbar.iter_mut().filter(|s| **s == id) {
+            *s = 0;
+        }
+        self.trim();
+    }
+
+    pub fn on_hotbar(&self, id: u32) -> bool {
+        id != 0 && self.hotbar.contains(&id)
+    }
+
+    /// (seconds left, full reuse time) while `id` is cooling down.
+    pub fn cooldown(&self, id: u32) -> Option<(f32, f32)> {
+        self.cooldowns.get(&id).copied().filter(|c| c.0 > 0.0)
+    }
+
+    /// The skill being cast: (skill id, seconds cast, cast time).
+    pub fn casting(&self) -> Option<(u32, f32, f32)> {
+        self.cast.as_ref().map(|c| (c.skill, c.time, c.total))
+    }
+
+    fn trim(&mut self) {
+        while self.hotbar.last() == Some(&0) {
+            self.hotbar.pop();
+        }
     }
 }
 
@@ -97,8 +198,8 @@ fn learn_skills(
                 stats.sp -= entry.sp;
             }
             skills.learned.insert(entry.skill, entry.level);
-            if have == 0 && def.is_active() && skills.hotbar.len() < HOTBAR {
-                skills.hotbar.push(entry.skill);
+            if have == 0 && def.is_active() {
+                skills.add_to_hotbar(entry.skill);
             }
             log.push(format!("Learned {} Lv {}", def.name, entry.level));
             changed = true;
@@ -109,39 +210,56 @@ fn learn_skills(
     skills.last_class = class_id;
 }
 
+/// Hotbar keys of one row, slot by slot.
+pub const SLOT_KEYS: [KeyCode; BAR_SLOTS] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
+    KeyCode::Digit0,
+    KeyCode::Minus,
+    KeyCode::Equal,
+];
+
+#[allow(clippy::too_many_arguments)]
 fn cast_input(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     book: Res<SkillBook>,
     data: Res<GameData>,
     target: Res<Target>,
+    (pages, mut press): (Res<HotbarPages>, ResMut<HotbarPress>),
     mut log: ResMut<Log>,
-    hero: Single<(&mut HeroStats, &mut HeroSkills, &Transform), With<Hero>>,
+    hero: Single<(Entity, &mut HeroStats, &mut HeroSkills, &Transform), With<Hero>>,
     npcs: Query<(&Npc, &Transform), Without<Hero>>,
 ) {
-    let (mut stats, mut skills, tr) = hero.into_inner();
+    let (hero_e, mut stats, mut skills, tr) = hero.into_inner();
+    let clicked = press.0.take();
     if skills.cast.is_some() || stats.hp <= 0.0 {
         return;
     }
-    const DIGITS: [KeyCode; 9] = [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
-    ];
-    let mut slot = DIGITS.iter().position(|k| keys.just_pressed(*k));
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let bar = if ctrl {
+        1
+    } else if alt {
+        2
+    } else {
+        0
+    };
+    let mut slot = SLOT_KEYS.iter().position(|k| keys.just_pressed(*k)).map(|i| pages.index(bar, i)).or(clicked);
     for pad in &gamepads {
         let face = [GamepadButton::South, GamepadButton::East, GamepadButton::West, GamepadButton::North];
         if let Some(i) = face.iter().position(|b| pad.just_pressed(*b)) {
             if pad.pressed(GamepadButton::LeftTrigger) {
-                slot = Some(i);
+                slot = Some(pages.index(0, i));
             } else if pad.pressed(GamepadButton::LeftTrigger2) {
-                slot = Some(4 + i);
+                slot = Some(pages.index(0, 4 + i));
             }
         }
     }
@@ -151,13 +269,14 @@ fn cast_input(
     });
     if slot.is_none() && std::env::var_os("L2_AUTOCAST").is_some() && target_near {
         slot = skills.hotbar.iter().position(|id| {
-            skills.cooldowns.get(id).is_none_or(|c| *c <= 0.0) && book.skills.get(id).is_some_and(|s| s.is_offensive())
+            skills.cooldown(*id).is_none() && book.skills.get(id).is_some_and(|s| s.is_offensive())
         });
     }
-    let Some(id) = slot.and_then(|i| skills.hotbar.get(i)).copied() else { return };
+    let Some(id) = slot.map(|i| skills.slot(i)).filter(|id| *id != 0) else { return };
     let Some(def) = book.skills.get(&id) else { return };
     let level = skills.learned.get(&id).copied().unwrap_or(1);
-    if skills.cooldowns.get(&id).is_some_and(|c| *c > 0.0) {
+    if let Some((left, _)) = skills.cooldown(id) {
+        log.push(format!("{} is not ready yet ({left:.0} s).", def.name));
         return;
     }
     let mp = def.mp.at(level);
@@ -176,12 +295,17 @@ fn cast_input(
                 }
                 Some(e)
             }
+            _ if target.0 == Some(hero_e) => {
+                log.push(format!("{}: invalid target", def.name));
+                return;
+            }
             _ => {
                 log.push(format!("{}: no target", def.name));
                 return;
             }
         }
     } else {
+        // Buffs and heals land on the hero: there is no party offline.
         None
     };
     stats.mp -= mp;
@@ -212,7 +336,7 @@ fn run_cast(
     let dt = time.delta_secs();
     let (hero_e, hero, mut tr, mut stats, mut skills, inv) = hero.into_inner();
     for c in skills.cooldowns.values_mut() {
-        *c -= dt;
+        c.0 -= dt;
     }
     let Some(mut cast) = skills.cast.take() else { return };
     let Some(def) = book.skills.get(&cast.skill).cloned() else { return };
@@ -273,7 +397,7 @@ fn run_cast(
     }
     if cast.time >= cast.total {
         let reuse = def.reuse.max(0.5);
-        skills.cooldowns.insert(cast.skill, reuse);
+        skills.cooldowns.insert(cast.skill, (reuse, reuse));
         return;
     }
     skills.cast = Some(cast);
@@ -311,8 +435,18 @@ fn apply_effects(
                 stats.hp = (stats.hp + power).min(stats.max_hp);
                 log.push(format!("{} restores {:.0} HP", def.name, power));
             }
+            "HealPercent" => {
+                let hp = stats.max_hp * power / 100.0;
+                stats.hp = (stats.hp + hp).min(stats.max_hp);
+                log.push(format!("{} restores {:.0} HP", def.name, hp));
+            }
+            "ManaHeal" | "ManaHealByLevel" => {
+                stats.mp = (stats.mp + power).min(stats.max_mp);
+                log.push(format!("{} restores {:.0} MP", def.name, power));
+            }
             "PhysicalAttack" | "PhysicalDefence" | "MagicalAttack" | "MagicalDefence" | "Speed" | "PhysicalAttackSpeed"
-            | "MaxHp" | "MaxMp" => {
+            | "MagicalAttackSpeed" | "Accuracy" | "PhysicalEvasion" | "CriticalRate" | "HpRegen" | "MpRegen" | "MaxHp"
+            | "MaxMp" => {
                 let amount = e.amount.at(level);
                 stats.buffs.retain(|b| !(b.skill == def.id && b.stat == e.name));
                 stats.buffs.push(Buff {
@@ -368,6 +502,7 @@ fn update_hotbar(
     mut lib: ResMut<L2Library>,
     mut images: ResMut<Assets<Image>>,
     hero: Single<&HeroSkills, With<Hero>>,
+    pages: Res<HotbarPages>,
     root: Option<Single<Entity, With<HotbarRoot>>>,
     iface: Option<Res<crate::l2ui::Interface>>,
     slots: Query<Entity, With<HotbarSlot>>,
@@ -392,10 +527,9 @@ fn update_hotbar(
         ));
         return;
     };
-    let now: Vec<(u32, u32, bool)> = hero
-        .hotbar
-        .iter()
-        .map(|id| (*id, hero.learned.get(id).copied().unwrap_or(0), hero.cooldowns.get(id).is_some_and(|c| *c > 0.0)))
+    let now: Vec<(u32, u32, bool)> = (0..BAR_SLOTS)
+        .map(|i| hero.slot(pages.index(0, i)))
+        .map(|id| (id, hero.learned.get(&id).copied().unwrap_or(0), hero.cooldown(id).is_some()))
         .collect();
     if *shown == now {
         return;
@@ -405,6 +539,9 @@ fn update_hotbar(
         commands.entity(e).despawn();
     }
     for (i, (id, level, cooling)) in now.into_iter().enumerate() {
+        if id == 0 {
+            continue;
+        }
         let icon_name = book.skills.get(&id).map(|s| s.icon.clone()).unwrap_or_default();
         let icon = icon_cache
             .entry(icon_name.clone())
