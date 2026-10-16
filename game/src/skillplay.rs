@@ -12,7 +12,7 @@ use bevy::prelude::*;
 
 
 use crate::datapack::{Datapack, ServerSkill, SkillBook};
-use crate::effects::{spawn_effect, EffectCache};
+use crate::effects::{spawn_effect_targeted, EffectCache};
 use crate::gamedata::{GameData, SkillDef};
 use crate::l2assets::{L2Library, UU_TO_M};
 use crate::mmo::{Hero, Phase};
@@ -212,9 +212,11 @@ fn run_cast(
     let Some(def) = book.skills.get(&cast.skill).cloned() else { return };
     let visual: Option<Arc<SkillDef>> = data.visuals.get(&cast.skill).cloned();
     let (meshes, materials, images) = &mut assets;
+    // Beams that end on an actor end on the cast's target.
+    let beam_target = cast.target;
     let mut fx = |name: &str, at: Transform, follow: Option<Entity>| {
         if let Some(asset) = cache.load(&mut lib, name, meshes, materials, images) {
-            spawn_effect(&mut commands, &asset, at, follow);
+            spawn_effect_targeted(&mut commands, &asset, at, follow, beam_target);
         }
     };
     let target_pos = cast.target.and_then(|e| npcs.get(e).ok()).map(|(_, t)| t.translation);

@@ -152,6 +152,7 @@ cargo run --release -p l2tool -- dat <client>                # decode skillgrp/n
 cargo run --release -p l2tool -- props <package> <export>     # tagged properties
 cargo run --release -p l2tool -- defaults <package> <class>   # class default properties
 cargo run --release -p l2tool -- effect <package> <class>     # effect emitters
+cargo run --release -p l2tool -- ribbons <package>...         # effect classes with beam / trail emitters
 cargo run --release -p l2tool -- map <client> <tile>           # map actors and terrain layers
 cargo run --release -p l2tool -- hex <package> <export> [n]
 ```
@@ -201,7 +202,16 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   Their SpriteEmitter/MeshEmitter subobjects hold tagged properties; non-native
   structs (`Range`, `RangeVector`, array elements) are nested tagged streams,
   native ones (`Vector`, `Color`) are raw. `game/src/effects.rs` plays sprite and
-  mesh emitters (beams/trails are skipped).
+  mesh emitters and draws beam and trail emitters as ribbons (`ribbon.rs`).
+  Emitter indices follow the class's `Emitters` array (not always the export
+  order); `Disabled` emitters are skipped. Lineage trails use
+  `AttachEmitterIndex` (0-based: the head follows that emitter's newest
+  particle) or `CoordinateSystem` 4 (the head follows the effect); most
+  single-point beams leave `BeamEndPoints[0].Weight` at 0.
+  Curved beams (`bApllyBezierCurve`, 96 in the client) bend along a Bezier
+  curve: each `ControlPoints` entry sits at `locationratio` along the beam,
+  offset by `pivotLocation` plus `oscillationRange * sin(2 pi Frequency t)`
+  in a frame along the beam (X forward); `RenderingDensity` points.
 - Skill visuals: `skillgrp` gives an animation combo code (`E`, `S`, `SMB01`;
   some single letters share a string slot shown as `L2Day - E`).
   `animationcombo` maps it to pawn variables (`CastMidAnimName`...), whose clip

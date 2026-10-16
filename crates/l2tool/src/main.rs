@@ -14,6 +14,7 @@ fn main() -> Result<()> {
         Some("alpha") => mat_alpha(&args[2], &args[3], &args[4]),
         Some("props") => dump_props(&args[2], &args[3]),
         Some("effect") => dump_effect(&args[2], &args[3]),
+        Some("ribbons") => ribbon_effects(&args[2..]),
         Some("defaults") => class_defaults(&args[2], &args[3]),
         Some("dat") => dat_summary(&args[2]),
         Some("xdat") => {
@@ -107,7 +108,8 @@ fn main() -> Result<()> {
         Some("hex") => hex(&args[2], args[3].parse()?, args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128)),
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
-             obj <pkg> <mesh> <out.obj> | materials <client> <pkg> <mesh> | hex <pkg> <export> [n]"
+             obj <pkg> <mesh> <out.obj> | materials <client> <pkg> <mesh> | \
+             ribbons <pkg>... | hex <pkg> <export> [n]"
         ),
     }
 }
@@ -411,6 +413,26 @@ pub fn dump_props(path: &str, object: &str) -> Result<()> {
 }
 
 /// Prints the decoded emitters of an effect class.
+/// Effect classes with beam or trail emitters, for checking how they look.
+pub fn ribbon_effects(paths: &[String]) -> Result<()> {
+    for path in paths {
+        let pkg = Package::open(path).with_context(|| path.clone())?;
+        for e in &pkg.exports {
+            if pkg.class_name(e) != "Class" {
+                continue;
+            }
+            let class = pkg.name(e.object_name).to_string();
+            let Some(emitters) = ue2::effect::read_effect(&pkg, &class) else { continue };
+            let beams = emitters.iter().filter(|m| m.beam.is_some()).count();
+            let trails = emitters.iter().filter(|m| m.trail.is_some()).count();
+            if beams + trails > 0 {
+                println!("{class}: {beams} beam, {trails} trail ({})", pkg.name);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn dump_effect(path: &str, class: &str) -> Result<()> {
     let pkg = Package::open(path)?;
     let emitters = ue2::effect::read_effect(&pkg, class).with_context(|| format!("no effect {class}"))?;
@@ -432,6 +454,12 @@ pub fn dump_effect(path: &str, class: &str) -> Result<()> {
             e.size_scale,
             e.color_scale.len()
         );
+        if let Some(b) = &e.beam {
+            println!("    beam {b:?}");
+        }
+        if let Some(t) = &e.trail {
+            println!("    trail {t:?}");
+        }
     }
     Ok(())
 }
