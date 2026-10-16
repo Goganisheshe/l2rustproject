@@ -203,6 +203,11 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   structs (`Range`, `RangeVector`, array elements) are nested tagged streams,
   native ones (`Vector`, `Color`) are raw. `game/src/effects.rs` plays sprite and
   mesh emitters and draws beam and trail emitters as ribbons (`ribbon.rs`).
+  Emitter indices follow the class's `Emitters` array (not always the export
+  order); `Disabled` emitters are skipped. Lineage trails use
+  `AttachEmitterIndex` (0-based: the head follows that emitter's newest
+  particle) or `CoordinateSystem` 4 (the head follows the effect); most
+  single-point beams leave `BeamEndPoints[0].Weight` at 0.
 - Skill visuals: `skillgrp` gives an animation combo code (`E`, `S`, `SMB01`;
   some single letters share a string slot shown as `L2Day - E`).
   `animationcombo` maps it to pawn variables (`CastMidAnimName`...), whose clip

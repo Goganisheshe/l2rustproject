@@ -94,6 +94,11 @@ pub struct TrailDef {
     /// `PTTL_FollowEmitter`: the head stays on the emitter instead of moving
     /// with the particle's velocity.
     pub follow_emitter: bool,
+    /// Lineage `AttachEmitterIndex`: the head follows the newest particle of
+    /// that emitter (an index into the effect's emitters).
+    pub attach: Option<usize>,
+    /// `CoordinateSystem`; Lineage adds 4, used by trails behind flying effects.
+    pub coordinate_system: u8,
     pub max_points: u32,
     /// A new point is added once the head moved this far (UU).
     pub distance_threshold: f32,
@@ -142,6 +147,8 @@ pub struct EmitterDef {
     pub rotation_from_actor: bool,
     pub beam: Option<BeamDef>,
     pub trail: Option<TrailDef>,
+    /// `Disabled`: only a script would switch it on.
+    pub disabled: bool,
 }
 
 /// Finds the effect class `class_name` in `pkg` and reads its emitters.
@@ -150,18 +157,43 @@ pub fn read_effect(pkg: &Package, class_name: &str) -> Option<Vec<EmitterDef>> {
         let e = &pkg.exports[i];
         pkg.class_name(e) == "Class" && pkg.name(e.object_name).eq_ignore_ascii_case(class_name)
     })?;
-    let mut out = Vec::new();
-    for (i, e) in pkg.exports.iter().enumerate() {
-        if e.package != ObjectRef::Export(class) {
-            continue;
+    let is_emitter = |i: usize| {
+        let e = &pkg.exports[i];
+        e.package == ObjectRef::Export(class) && pkg.class_name(e).ends_with("Emitter")
+    };
+    // Emitter indices (`AttachEmitterIndex`, ...) follow the class's
+    // `Emitters` array, which is not always the export order.
+    let listed: Vec<usize> = crate::props::class_defaults(pkg, class)
+        .map(|d| d.object_array(pkg, "Emitters"))
+        .unwrap_or_default()
+        .into_iter()
+        .map_while(|r| match r {
+            ObjectRef::Export(i) if i < pkg.exports.len() && is_emitter(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    let exported: Vec<usize> = (0..pkg.exports.len()).filter(|&i| is_emitter(i)).collect();
+    let order = if !listed.is_empty() && listed.len() == exported.len() { listed } else { exported };
+    let mut out: Vec<EmitterDef> = order
+        .iter()
+        .map(|&i| {
+            let e = &pkg.exports[i];
+            let mut r = Reader::new(pkg.export_data(i));
+            match Properties::read(pkg, &mut r) {
+                Ok(p) => emitter(pkg, pkg.class_name(e), &p, pkg.name(e.object_name)),
+                // Keep the slot so later indices still line up.
+                Err(_) => EmitterDef { disabled: true, ..emitter(pkg, pkg.class_name(e), &Properties::default(), pkg.name(e.object_name)) },
+            }
+        })
+        .collect();
+    let n = out.len();
+    for (k, d) in out.iter_mut().enumerate() {
+        if let Some(t) = d.trail.as_mut() {
+            // Pointing at itself or past the end means no attachment.
+            t.attach = t.attach.filter(|&a| a != k && a < n);
+            // Lineage's CoordinateSystem 4 on a free trail: it follows the effect.
+            t.follow_emitter |= t.attach.is_none() && t.coordinate_system == 4;
         }
-        let class = pkg.class_name(e);
-        if !class.ends_with("Emitter") {
-            continue;
-        }
-        let mut r = Reader::new(pkg.export_data(i));
-        let Ok(p) = Properties::read(pkg, &mut r) else { continue };
-        out.push(emitter(pkg, class, &p, pkg.name(e.object_name)));
     }
     Some(out)
 }
@@ -252,6 +284,7 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
         rotation_from_actor: p.byte(pkg, "UseRotationFrom").unwrap_or(0) == 1,
         beam,
         trail,
+        disabled: b("Disabled", false),
     }
 }
 
@@ -292,6 +325,8 @@ fn trail(pkg: &Package, p: &Properties) -> TrailDef {
     TrailDef {
         shade,
         follow_emitter: p.byte(pkg, "TrailLocation").unwrap_or(0) == 1,
+        attach: p.int(pkg, "AttachEmitterIndex").filter(|&a| a >= 0).map(|a| a as usize),
+        coordinate_system: p.byte(pkg, "CoordinateSystem").unwrap_or(1),
         max_points: p.int(pkg, "MaxPointsPerTrail").unwrap_or(100).max(2) as u32,
         distance_threshold: p.float(pkg, "DistanceThreshold").unwrap_or(2.0).max(0.0),
         crossed_sheets: p.bool(pkg, "UseCrossedSheets").unwrap_or(false),

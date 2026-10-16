@@ -121,7 +121,12 @@ fn build(
         Some((pkg, defs))
     })?;
     let mut emitters = Vec::new();
-    for def in defs {
+    // Emitter index in the class -> index in `emitters` (some are skipped).
+    let mut index_map: Vec<Option<usize>> = vec![None; defs.len()];
+    for (def_index, def) in defs.into_iter().enumerate() {
+        if def.disabled {
+            continue;
+        }
         let visual = match def.kind {
             EmitterKind::Sprite | EmitterKind::Beam | EmitterKind::Trail => {
                 let l = lib.lib.as_mut()?;
@@ -163,7 +168,13 @@ fn build(
             }
             EmitterKind::Other(_) => continue,
         };
+        index_map[def_index] = Some(emitters.len());
         emitters.push(Emitter { def, visual });
+    }
+    for em in &mut emitters {
+        if let Visual::Trail { trail, .. } = &mut em.visual {
+            trail.attach = trail.attach.and_then(|a| index_map.get(a).copied().flatten());
+        }
     }
     Some(EffectAsset { emitters })
 }
@@ -276,6 +287,8 @@ struct TrailState {
     points: VecDeque<TrailPoint>,
     /// Spawn offset in effect space when the head stays on the emitter.
     on_emitter: Option<Vec3>,
+    /// The head follows the newest particle of this emitter.
+    attach: Option<usize>,
 }
 
 struct TrailPoint {
@@ -417,7 +430,7 @@ fn emit(
                     }
                     Visual::Trail { image, trail } => {
                         let on_emitter = trail.follow_emitter.then_some(offset);
-                        let kind = RibbonKind::Trail(TrailState { points: VecDeque::new(), on_emitter });
+                        let kind = RibbonKind::Trail(TrailState { points: VecDeque::new(), on_emitter, attach: trail.attach });
                         spawn_ribbon(&mut commands, &mut meshes, &mut materials, particle, kind, d, image, size[0], &mut rng);
                     }
                 }
@@ -480,9 +493,14 @@ fn beam_end_by_distance(beam: &BeamDef, start: Vec3, forward: Vec3, rng: &mut im
 
 /// A `BeamEndPoints` entry picked by weight, its offset randomized.
 fn beam_end_by_offset(beam: &BeamDef, rng: &mut impl Rng) -> Option<Vec3> {
-    let total: f32 = beam.end_points.iter().map(|p| p.weight.max(0.0)).sum();
-    if total <= 0.0 {
+    if beam.end_points.is_empty() {
         return None;
+    }
+    let total: f32 = beam.end_points.iter().map(|p| p.weight.max(0.0)).sum();
+    // Lineage leaves Weight at 0 on most single-point beams: pick evenly then.
+    if total <= 0.0 {
+        let point = &beam.end_points[rng.random_range(0..beam.end_points.len())];
+        return Some(uu(rand_vec(rng, point.offset)));
     }
     let mut pick = rng.random_range(0.0..total);
     let point = beam.end_points.iter().find(|p| {
@@ -629,6 +647,15 @@ fn update_particles(
     let dt = time.delta_secs();
     let (_, cam_rot, cam_pos) = camera.to_scale_rotation_translation();
     let mut rng = rand::rng();
+    // Newest live particle of each emitter, for trails attached to one.
+    let mut newest: HashMap<(Entity, usize), (f32, Vec3)> = HashMap::new();
+    for (_, p, tr) in particles.iter() {
+        let pos = if p.ribbon.is_some() { p.pos } else { tr.translation };
+        let slot = newest.entry((p.effect, p.emitter)).or_insert((f32::MAX, pos));
+        if p.age < slot.0 {
+            *slot = (p.age, pos);
+        }
+    }
     for (e, mut p, mut tr) in &mut particles {
         p.age += dt;
         if p.age >= p.life {
@@ -654,7 +681,13 @@ fn update_particles(
         if p.ribbon.is_some() {
             let step = p.velocity * dt;
             p.pos += step;
-            update_ribbon(&mut p, size, dt, cam_pos, &targets, &mut meshes, &mut rng);
+            let attached = match &p.ribbon {
+                Some(Ribbon { kind: RibbonKind::Trail(t), .. }) => {
+                    t.attach.and_then(|a| newest.get(&(p.effect, a))).map(|x| x.1)
+                }
+                _ => None,
+            };
+            update_ribbon(&mut p, size, dt, cam_pos, attached, &targets, &mut meshes, &mut rng);
         } else {
             tr.translation += p.velocity * dt;
             tr.scale = p.base_scale * size;
@@ -701,11 +734,13 @@ fn update_particles(
 }
 
 /// Moves a beam or trail and rebuilds its strip.
+#[allow(clippy::too_many_arguments)]
 fn update_ribbon(
     p: &mut Particle,
     size: f32,
     dt: f32,
     cam: Vec3,
+    attached: Option<Vec3>,
     targets: &Query<&GlobalTransform, (Without<Effect>, Without<Particle>)>,
     meshes: &mut Assets<Mesh>,
     rng: &mut impl Rng,
@@ -743,9 +778,11 @@ fn update_ribbon(
             (pts, facing, beam.v_scale)
         }
         (RibbonKind::Trail(tr), Visual::Trail { trail, .. }) => {
-            let head = match tr.on_emitter {
-                Some(offset) => etr.transform_point(offset),
-                None => head,
+            // An attached trail stops growing once its particle is gone.
+            let head = match (tr.attach, tr.on_emitter) {
+                (Some(_), _) => attached,
+                (None, Some(offset)) => Some(etr.transform_point(offset)),
+                (None, None) => Some(head),
             };
             for pt in tr.points.iter_mut() {
                 pt.age += dt;
@@ -754,8 +791,10 @@ fn update_ribbon(
                 tr.points.retain(|pt| pt.age < trail.point_life);
             }
             let threshold = trail.distance_threshold * UU_TO_M;
-            if tr.points.back().is_none_or(|last| last.pos.distance(head) > threshold) {
-                tr.points.push_back(TrailPoint { pos: head, age: 0.0, shade: rng.random_range(0.0..=1.0) });
+            if let Some(head) = head {
+                if tr.points.back().is_none_or(|last| last.pos.distance(head) > threshold) {
+                    tr.points.push_back(TrailPoint { pos: head, age: 0.0, shade: rng.random_range(0.0..=1.0) });
+                }
             }
             let cap = (trail.max_points as usize).clamp(2, MAX_TRAIL_POINTS);
             while tr.points.len() > cap {
@@ -763,7 +802,7 @@ fn update_ribbon(
             }
             // Oldest point first; the live head closes the strip.
             let mut line: Vec<(Vec3, f32, f32)> = tr.points.iter().map(|pt| (pt.pos, pt.age, pt.shade)).collect();
-            if line.last().is_some_and(|l| l.0.distance(head) > 1e-4) {
+            if let Some(head) = head.filter(|h| line.last().is_some_and(|l| l.0.distance(*h) > 1e-4)) {
                 line.push((head, 0.0, 1.0));
             }
             let n = line.len();
@@ -791,10 +830,16 @@ fn update_ribbon(
         }
         _ => return,
     };
-    let built = ribbon::build(&points, facing, v_scale);
-    // A trail needs two points before it has any area; keep the old strip.
+    let mut built = ribbon::build(&points, facing, v_scale);
+    // Fewer than two points (a trail just born or fully faded): nothing to draw.
     if built.indices.is_empty() {
-        return;
+        let at = points.first().map(|q| q.pos).unwrap_or(head.to_array());
+        built = ribbon::RibbonMesh {
+            positions: vec![at; 4],
+            uvs: vec![[0.0; 2]; 4],
+            colors: vec![[0.0; 4]; 4],
+            indices: vec![0, 2, 1, 1, 2, 3],
+        };
     }
     if let Some(mut mesh) = meshes.get_mut(&r.mesh) {
         write_mesh(&mut *mesh, built);
