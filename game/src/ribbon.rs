@@ -155,6 +155,30 @@ pub fn sample_lf(lf: &[V3], t: f32) -> V3 {
     }
 }
 
+/// Point on the Bezier curve with these control points (de Casteljau);
+/// the curve starts at the first point and ends at the last.
+pub fn bezier(points: &[V3], t: f32) -> V3 {
+    let mut work = points.to_vec();
+    if work.is_empty() {
+        return [0.0; 3];
+    }
+    for level in (1..work.len()).rev() {
+        for i in 0..level {
+            work[i] = add(scale(work[i], 1.0 - t), scale(work[i + 1], t));
+        }
+    }
+    work[0]
+}
+
+/// Unit axes along a line: (forward, side, up). `up_hint` breaks the tie
+/// around the line; a line along the hint uses `fallback` instead.
+pub fn line_frame(forward: V3, up_hint: V3, fallback: V3) -> (V3, V3, V3) {
+    let f = normalize(forward).unwrap_or([1.0, 0.0, 0.0]);
+    let side = normalize(cross(up_hint, f)).or_else(|| normalize(cross(fallback, f))).unwrap_or_else(|| perpendicular(f));
+    let up = cross(f, side);
+    (f, side, up)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +242,30 @@ mod tests {
         assert_eq!(sample_lf(&lf, 1.0), [0.0; 3]);
         let q = sample_lf(&lf, 0.25)[1];
         assert!(q > 0.0 && q < 2.0);
+    }
+
+    #[test]
+    fn bezier_ends_and_middle() {
+        let p = [[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 2.0, 0.0], [3.0, 0.0, 0.0]];
+        assert_eq!(bezier(&p, 0.0), p[0]);
+        assert_eq!(bezier(&p, 1.0), p[3]);
+        let m = bezier(&p, 0.5);
+        assert!((m[0] - 1.5).abs() < 1e-6 && (m[1] - 1.5).abs() < 1e-6);
+        assert_eq!(bezier(&p[..2], 0.25), [0.25, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn frame_is_orthonormal() {
+        for fwd in [[1.0, 0.0, 0.0], [0.3, 0.2, -0.9], [0.0, 5.0, 0.0]] {
+            let (f, s, u) = line_frame(fwd, [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+            for v in [f, s, u] {
+                assert!((length(v) - 1.0).abs() < 1e-5);
+            }
+            assert!(dot(f, s).abs() < 1e-5 && dot(f, u).abs() < 1e-5 && dot(s, u).abs() < 1e-5);
+        }
+        // Horizontal line: up stays up.
+        let (_, _, u) = line_frame([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        assert!((u[1] - 1.0).abs() < 1e-5);
     }
 
     #[test]

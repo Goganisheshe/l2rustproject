@@ -645,6 +645,7 @@ fn update_particles(
     targets: Query<&GlobalTransform, (Without<Effect>, Without<Particle>)>,
 ) {
     let dt = time.delta_secs();
+    let now = time.elapsed_secs();
     let (_, cam_rot, cam_pos) = camera.to_scale_rotation_translation();
     let mut rng = rand::rng();
     // Newest live particle of each emitter, for trails attached to one.
@@ -687,7 +688,7 @@ fn update_particles(
                 }
                 _ => None,
             };
-            update_ribbon(&mut p, size, dt, cam_pos, attached, &targets, &mut meshes, &mut rng);
+            update_ribbon(&mut p, size, dt, cam_pos, now, attached, &targets, &mut meshes, &mut rng);
         } else {
             tr.translation += p.velocity * dt;
             tr.scale = p.base_scale * size;
@@ -734,12 +735,32 @@ fn update_particles(
 }
 
 /// Moves a beam or trail and rebuilds its strip.
+/// Bezier control polygon of a Lineage curved beam: start, each control
+/// point at its place along the beam swinging over time, end. Offsets are in
+/// a frame along the beam (Unreal X forward, Y side, Z up).
+fn beam_curve(beam: &BeamDef, start: Vec3, end: Vec3, rotation: Quat, time: f32) -> Vec<[f32; 3]> {
+    let (f, side, up) = ribbon::line_frame((end - start).to_array(), [0.0, 1.0, 0.0], (rotation * Vec3::X).to_array());
+    let (f, side, up) = (Vec3::from_array(f), Vec3::from_array(side), Vec3::from_array(up));
+    let mut points = vec![start.to_array()];
+    let mut controls: Vec<_> = beam.control_points.iter().collect();
+    controls.sort_by(|a, b| a.ratio.total_cmp(&b.ratio));
+    for c in controls {
+        let swing = (std::f32::consts::TAU * c.frequency * time).sin();
+        let o = [0, 1, 2].map(|k| c.pivot[k] + c.oscillation[k] * swing);
+        let offset = (f * o[0] + side * o[1] + up * o[2]) * UU_TO_M;
+        points.push((start.lerp(end, c.ratio.clamp(0.0, 1.0)) + offset).to_array());
+    }
+    points.push(end.to_array());
+    points
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_ribbon(
     p: &mut Particle,
     size: f32,
     dt: f32,
     cam: Vec3,
+    time: f32,
     attached: Option<Vec3>,
     targets: &Query<&GlobalTransform, (Without<Effect>, Without<Particle>)>,
     meshes: &mut Assets<Mesh>,
@@ -762,14 +783,28 @@ fn update_ribbon(
             };
             let dir = (end - start).normalize_or_zero().to_array();
             let lf: Vec<[f32; 3]> = b.lf.iter().map(|v| v.to_array()).collect();
-            let n = b.hf.len().max(2);
+            let hf: Vec<[f32; 3]> = b.hf.iter().map(|v| v.to_array()).collect();
+            let curve = beam.bezier.then(|| beam_curve(beam, start, end, etr.rotation, time));
+            // A curve is sampled densely; a straight beam has one point per HF point.
+            let n = match &curve {
+                Some(_) => (beam.density as usize).clamp(8, MAX_BEAM_POINTS),
+                None => b.hf.len().max(2),
+            };
             let pos: Vec<[f32; 3]> = (0..n)
                 .map(|i| {
                     let t = i as f32 / (n - 1) as f32;
-                    let local = b.hf.get(i).copied().unwrap_or(Vec3::ZERO) + Vec3::from_array(ribbon::sample_lf(&lf, t));
+                    let base = match &curve {
+                        Some(c) => Vec3::from_array(ribbon::bezier(c, t)),
+                        None => start.lerp(end, t),
+                    };
+                    let hf_noise = match &curve {
+                        Some(_) => Vec3::from_array(ribbon::sample_lf(&hf, t)),
+                        None => b.hf.get(i).copied().unwrap_or(Vec3::ZERO),
+                    };
+                    let local = hf_noise + Vec3::from_array(ribbon::sample_lf(&lf, t));
                     // Noise bends the beam sideways, never along it.
                     let noise = Vec3::from_array(ribbon::reject((etr.rotation * local).to_array(), dir));
-                    (start.lerp(end, t) + noise).to_array()
+                    (base + noise).to_array()
                 })
                 .collect();
             let u = ribbon::u_by_length(&pos, beam.u_scale);

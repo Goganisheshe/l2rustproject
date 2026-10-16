@@ -54,6 +54,19 @@ pub struct BeamEndPoint {
     pub weight: f32,
 }
 
+/// Lineage `ControlPoints` entry of a curved beam (`bApllyBezierCurve`).
+#[derive(Debug, Clone)]
+pub struct BeamControlPoint {
+    /// Where along the beam (0..1) the point sits.
+    pub ratio: f32,
+    /// Fixed offset, in a frame along the beam (X forward).
+    pub pivot: [f32; 3],
+    /// The point swings by up to this much (same frame) ...
+    pub oscillation: [f32; 3],
+    /// ... this many times a second.
+    pub frequency: f32,
+}
+
 /// `BeamEmitter` settings. Each particle is one beam.
 #[derive(Debug, Clone)]
 pub struct BeamDef {
@@ -73,6 +86,11 @@ pub struct BeamDef {
     pub hf_noise: [[f32; 2]; 3],
     /// Noise may move the end point too.
     pub noise_moves_end: bool,
+    /// Lineage curved beams: a Bezier curve through swinging control points.
+    pub bezier: bool,
+    pub control_points: Vec<BeamControlPoint>,
+    /// Lineage `RenderingDensity`: points along a curved beam.
+    pub density: u32,
 }
 
 /// `ETrailShadeType`: how brightness varies along a trail.
@@ -311,6 +329,18 @@ fn beam(pkg: &Package, p: &Properties) -> BeamDef {
         hf_points: count("HighFrequencyPoints", 10),
         hf_noise: p.range_vector(pkg, "HighFrequencyNoiseRange").unwrap_or(zero),
         noise_moves_end: p.bool(pkg, "NoiseDeterminesEndPoint").unwrap_or(false),
+        bezier: p.bool(pkg, "bApllyBezierCurve").unwrap_or(false),
+        control_points: p
+            .struct_array(pkg, "ControlPoints")
+            .iter()
+            .map(|c| BeamControlPoint {
+                ratio: c.float(pkg, "locationratio").unwrap_or(0.5),
+                pivot: c.vector(pkg, "pivotLocation").unwrap_or([0.0; 3]),
+                oscillation: c.vector(pkg, "oscillationRange").unwrap_or([0.0; 3]),
+                frequency: c.float(pkg, "Frequency").unwrap_or(0.0),
+            })
+            .collect(),
+        density: count("RenderingDensity", 2),
     }
 }
 
