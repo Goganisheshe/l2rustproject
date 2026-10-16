@@ -248,6 +248,9 @@ fn build_model(
 
     // Merged skeleton: (name, parent, local translation, local rotation).
     let mut bones: Vec<(String, usize, Vec3, Quat)> = Vec::new();
+    // Roots of part skeletons hung from a body bone: their own animation
+    // tracks are in their mesh's space, so they keep the hung pose.
+    let mut hung: Vec<usize> = Vec::new();
     let mut bone_index: HashMap<String, usize> = HashMap::new();
     let mut remaps: Vec<Vec<u16>> = Vec::new();
     for (_, m) in &loaded {
@@ -271,6 +274,7 @@ fn build_model(
                             .unwrap_or(0);
                         let (_, r, t) = (globals[host].inverse() * root).to_scale_rotation_translation();
                         debug!("{mesh_name}: {} hangs from {}", b.name, bones[host].0);
+                        hung.push(j);
                         bones.push((b.name.clone(), host, t, r.normalize()));
                     } else {
                         let parent = if i == 0 { 0 } else { remap.get(b.parent).copied().unwrap_or(0) as usize };
@@ -362,7 +366,7 @@ fn build_model(
         None => l.resolve(&pkg, sm.animation),
     };
     let mut clips = Vec::new();
-    if let Some(ah) = anim_handle {
+    if let Some(ah) = &anim_handle {
         match ue2::anim::read_animation(&ah.package, ah.export) {
             Ok(a) => {
                 let by_name: HashMap<String, usize> =
@@ -387,6 +391,37 @@ fn build_model(
             }
             Err(e) => warn!("animation for {mesh_name}: {e}"),
         }
+    }
+    // Parts with an animation set of their own (the Kamael wing, skirts)
+    // add its tracks for their bones to the clips of the same name.
+    let primary = anim_handle.as_ref().map(|h| (h.package.name.clone(), h.export));
+    for (ph, m) in loaded.iter().skip(1) {
+        let Some(ah) = l.resolve(&ph.package, m.animation) else { continue };
+        if primary.as_ref() == Some(&(ah.package.name.clone(), ah.export)) {
+            continue;
+        }
+        let Ok(a) = ue2::anim::read_animation(&ah.package, ah.export) else { continue };
+        let by_name: HashMap<String, usize> = bone_keys(a.bones.iter().map(String::as_str)).into_iter().enumerate().map(|(i, k)| (k, i)).collect();
+        let map: Vec<Option<usize>> = bone_keys(bones.iter().map(|b| b.0.as_str()))
+            .iter()
+            .enumerate()
+            .map(|(bone, k)| by_name.get(k).copied().filter(|_| !hung.contains(&bone)))
+            .collect();
+        let seqs: HashMap<String, usize> = a.sequences.iter().enumerate().map(|(i, s)| (s.name.to_ascii_lowercase(), i)).collect();
+        for clip in clips.iter_mut() {
+            let Some(seq) = seqs.get(&clip.name.to_ascii_lowercase()).map(|&i| &a.sequences[i]) else { continue };
+            for (bone, ti) in map.iter().enumerate() {
+                let Some(t) = ti.and_then(|ti| seq.tracks.get(ti)) else { continue };
+                if clip.tracks.get(bone).is_some_and(|k| k.is_none()) {
+                    clip.tracks[bone] = Some(Key {
+                        times: t.times.clone(),
+                        rot: t.rotations.iter().map(|&q| ue_quat(q, bone == 0, mode)).collect(),
+                        pos: t.translations.iter().map(|&p| ue_pos(p)).collect(),
+                    });
+                }
+            }
+        }
+        debug!("{mesh_name}: extra animation {}", ah.name());
     }
     info!(
         "model {package}:{mesh_name}: {} verts, {} bones, {} clips, {height:.2} m tall",

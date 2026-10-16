@@ -128,6 +128,14 @@ pub fn equipment_spec(lib: &mut L2Library, class: &CharClass, armor: &HashMap<ch
             parts.push(format!("{mesh}@{texture_pkg}/{p}_m000_t00_m00_{hair}"));
         }
     }
+    // Kamael wear one wing, skinned to a little skeleton of its own on the
+    // spine and flapping with its own animation set (`Wing_<prefix>`).
+    if p.ends_with("Kamael") {
+        let mesh = format!("{p}_m000_w_ad00");
+        if lib.lib.as_mut().and_then(|l| l.find(class.package, &mesh)).is_some() {
+            parts.push(format!("{mesh}@{texture_pkg}/{p}_m000_t00_w"));
+        }
+    }
     for slot in ["u", "l", "g", "b"] {
         if let Some(part) = armor.get(&slot.chars().next().unwrap()) {
             if !part.is_empty() {
