@@ -106,6 +106,12 @@ pub struct Attachment {
 }
 
 impl Model {
+    /// Length in seconds of the first clip found among `names`.
+    pub fn clip_seconds(&self, names: &[&str]) -> Option<f32> {
+        let c = &self.clips[names.iter().find_map(|n| self.clip(n))?];
+        Some(c.frames.max(1.0) / if c.rate > 0.0 { c.rate } else { 30.0 })
+    }
+
     /// Finds a clip by exact name, or by prefix for race-suffixed player
     /// clips like `run_1HS_MFighter`.
     pub fn clip(&self, name: &str) -> Option<usize> {

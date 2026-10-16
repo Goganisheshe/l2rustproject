@@ -158,8 +158,67 @@ struct Cast {
     target: Option<Entity>,
     time: f32,
     total: f32,
+    /// Step of `plan` playing.
     stage: usize,
     fired: bool,
+    /// MP paid, given back if the cast is interrupted.
+    mp: f32,
+    plan: Vec<Step>,
+    /// When the skill goes off.
+    release_at: f32,
+}
+
+/// One clip of a cast animation: candidate clip names, start time, speed.
+struct Step {
+    names: Vec<String>,
+    start: f32,
+    speed: f32,
+    looping: bool,
+}
+
+/// Lays the skill's animation combo over the cast time. Looping combos
+/// (`CastMid`, `CastEnd`, `MagicShot`) loop their first clip and play the
+/// others at the end; the rest play their clips one after another, sped up or
+/// slowed down to fill the cast. Returns the steps and the moment the skill
+/// goes off: the start of the last clip (the shot), or for a single clip a
+/// little before the middle of the cast.
+fn plan_cast(visual: Option<&SkillDef>, hero: &Hero, model: Option<&crate::skinned::Model>, total: f32) -> (Vec<Step>, f32) {
+    let mut bases: Vec<String> = visual.map(|v| v.anims.clone()).unwrap_or_default();
+    if bases.is_empty() {
+        bases.push("Atk01".into());
+    }
+    let names: Vec<Vec<String>> = bases
+        .iter()
+        .map(|b| vec![format!("{b}_{}", hero.stance), format!("{b}_1HS"), b.clone(), format!("Atk01_{}", hero.stance)])
+        .collect();
+    let lens: Vec<f32> = names
+        .iter()
+        .map(|n| model.and_then(|m| m.clip_seconds(&n.iter().map(String::as_str).collect::<Vec<_>>())).unwrap_or(0.6).max(0.05))
+        .collect();
+    let mut steps = Vec::new();
+    if visual.is_some_and(|v| v.looped) && names.len() > 1 {
+        let tail: f32 = lens[1..].iter().sum();
+        let tail_time = tail.min(total * 0.5).max(0.01);
+        let speed = tail / tail_time;
+        steps.push(Step { names: names[0].clone(), start: 0.0, speed: 1.0, looping: true });
+        let mut t = total - tail_time;
+        for (n, l) in names[1..].iter().zip(&lens[1..]) {
+            steps.push(Step { names: n.clone(), start: t, speed, looping: false });
+            t += l / speed;
+        }
+    } else {
+        let speed = (lens.iter().sum::<f32>() / total.max(0.01)).clamp(0.5, 3.0);
+        let mut t = 0.0;
+        for (n, l) in names.iter().zip(&lens) {
+            steps.push(Step { names: n.clone(), start: t, speed, looping: false });
+            t += l / speed;
+        }
+    }
+    let release = match steps.len() {
+        1 => total * 0.45,
+        _ => steps.last().map_or(0.0, |s| s.start),
+    };
+    (steps, release.min(total))
 }
 
 /// Gives the class tree's `autoGet` skills on reaching their level; the rest
@@ -233,7 +292,7 @@ fn cast_input(
     book: Res<SkillBook>,
     data: Res<GameData>,
     target: Res<Target>,
-    (pages, mut press): (Res<HotbarPages>, ResMut<HotbarPress>),
+    (pages, mut press, mut move_to): (Res<HotbarPages>, ResMut<HotbarPress>, ResMut<crate::mmo::MoveTarget>),
     mut log: ResMut<Log>,
     hero: Single<(Entity, &mut HeroStats, &mut HeroSkills, &Transform), With<Hero>>,
     npcs: Query<(&Npc, &Transform), Without<Hero>>,
@@ -310,11 +369,13 @@ fn cast_input(
     };
     stats.mp -= mp;
     stats.attacking = false;
+    // Casting stops the hero where he stands.
+    move_to.0 = None;
     // Cast time scales with casting speed (magic) or attack speed.
     let magic = data.visuals.get(&id).is_some_and(|v| v.magic);
     let speed = if magic { stats.matk_speed / 333.0 } else { stats.patk_speed / 300.0 };
     let total = (def.hit_time / speed.max(0.1)).clamp(0.3, 4.0);
-    skills.cast = Some(Cast { skill: id, level, target: tgt, time: 0.0, total, stage: usize::MAX, fired: false });
+    skills.cast = Some(Cast { skill: id, level, target: tgt, time: 0.0, total, stage: usize::MAX, fired: false, mp, plan: Vec::new(), release_at: 0.0 });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -332,6 +393,7 @@ fn run_cast(
     hero: Single<(Entity, &Hero, &mut Transform, &mut HeroStats, &mut HeroSkills, Option<&mut crate::items::Inventory>)>,
     mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
+    (input, move_to): (Res<crate::input::PlayerInput>, Res<crate::mmo::MoveTarget>),
 ) {
     let dt = time.delta_secs();
     let (hero_e, hero, mut tr, mut stats, mut skills, inv) = hero.into_inner();
@@ -339,6 +401,15 @@ fn run_cast(
         c.0 -= dt;
     }
     let Some(mut cast) = skills.cast.take() else { return };
+    // Moving (or dying) before the skill goes off interrupts the cast.
+    if !cast.fired && (input.move_dir.length() > 0.1 || move_to.0.is_some() || stats.hp <= 0.0) {
+        stats.mp = (stats.mp + cast.mp).min(stats.max_mp);
+        if let Ok(mut a) = anims.get_mut(hero.actor) {
+            a.speed = 1.0;
+        }
+        log.push("Casting has been interrupted.");
+        return;
+    }
     let Some(def) = book.skills.get(&cast.skill).cloned() else { return };
     let visual: Option<Arc<SkillDef>> = data.visuals.get(&cast.skill).cloned();
     let (meshes, materials, images) = &mut assets;
@@ -355,29 +426,29 @@ fn run_cast(
         }
     }
 
-    // Animation stages: a looping cast clip, then the release clip(s).
-    let anims_list: Vec<String> = visual.as_ref().map(|v| v.anims.clone()).unwrap_or_default();
-    let release_at = if anims_list.len() > 1 { cast.total * 0.7 } else { cast.total * 0.45 };
-    let stage = if anims_list.len() > 1 && cast.time >= release_at { anims_list.len() - 1 } else { 0 };
+    // Animation: the combo's clips laid over the cast time.
+    if cast.plan.is_empty() {
+        let model = anims.get(hero.actor).ok().map(|a| a.model.clone());
+        let (plan, release_at) = plan_cast(visual.as_deref(), hero, model.as_deref(), cast.total);
+        cast.plan = plan;
+        cast.release_at = release_at;
+        for spec in visual.iter().flat_map(|v| v.casting.iter()) {
+            let at = Transform::from_translation(tr.translation + Vec3::Y + tr.rotation * spec.offset).with_rotation(tr.rotation);
+            fx(&spec.class, at, spec.attached.then_some(hero_e));
+        }
+    }
+    let stage = cast.plan.iter().rposition(|s| cast.time >= s.start).unwrap_or(0);
     if stage != cast.stage {
         cast.stage = stage;
-        if let (Ok(mut a), Some(base)) = (anims.get_mut(hero.actor), anims_list.get(stage)) {
-            let names = [format!("{base}_{}", hero.stance), format!("{base}_1HS"), base.clone(), format!("Atk01_{}", hero.stance)];
-            let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            let looping = stage == 0 && anims_list.len() > 1;
-            a.restart(&names, looping);
-            a.speed = 1.0;
-        }
-        if stage == 0 {
-            for spec in visual.iter().flat_map(|v| v.casting.iter()) {
-                let at = Transform::from_translation(tr.translation + Vec3::Y + tr.rotation * spec.offset).with_rotation(tr.rotation);
-                fx(&spec.class, at, spec.attached.then_some(hero_e));
-            }
+        if let (Ok(mut a), Some(step)) = (anims.get_mut(hero.actor), cast.plan.get(stage)) {
+            let names: Vec<&str> = step.names.iter().map(String::as_str).collect();
+            a.restart(&names, step.looping);
+            a.speed = step.speed;
         }
     }
 
     cast.time += dt;
-    if !cast.fired && cast.time >= release_at {
+    if !cast.fired && cast.time >= cast.release_at {
         cast.fired = true;
         for spec in visual.iter().flat_map(|v| v.shot.iter()) {
             let at = match (spec.on_target, target_pos) {
@@ -396,6 +467,9 @@ fn run_cast(
         apply_effects(&def, cast.level, cast.target, &mut stats, &mut npcs, &dp, &mut log, shot);
     }
     if cast.time >= cast.total {
+        if let Ok(mut a) = anims.get_mut(hero.actor) {
+            a.speed = 1.0;
+        }
         let reuse = def.reuse.max(0.5);
         skills.cooldowns.insert(cast.skill, (reuse, reuse));
         return;

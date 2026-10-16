@@ -363,10 +363,10 @@ fn move_hero(
     streamer: Res<TileStreamer>,
     world: Res<CollisionWorld>,
     mut target: ResMut<MoveTarget>,
-    hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
+    hero: Single<(&Hero, &mut Transform, &mut HeroStats, Option<&crate::skillplay::HeroSkills>)>,
     mut anims: Query<&mut Animated>,
 ) {
-    let (hero, mut tr, mut stats) = hero.into_inner();
+    let (hero, mut tr, mut stats, skills) = hero.into_inner();
     if stats.hp <= 0.0 {
         target.0 = None;
         stats.sitting = false;
@@ -451,6 +451,9 @@ fn move_hero(
     }
     if stats.attacking && !moving {
         return; // combat drives the animation
+    }
+    if !moving && skills.is_some_and(|s| s.casting().is_some()) {
+        return; // so does casting (moving interrupts it)
     }
     // Let the stand-up clip finish before idling.
     if !moving {
