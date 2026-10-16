@@ -105,7 +105,7 @@ fn learn_skills(
 
 fn cast_input(
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     book: Res<SkillBook>,
     data: Res<GameData>,
     target: Res<Target>,

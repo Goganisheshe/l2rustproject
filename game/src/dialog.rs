@@ -325,7 +325,7 @@ fn approach_npc(
 #[allow(clippy::too_many_arguments)]
 fn dialog_input(
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     input: Res<PlayerInput>,
     mut dialog: ResMut<Dialog>,
     hero: Single<&Transform, With<Hero>>,

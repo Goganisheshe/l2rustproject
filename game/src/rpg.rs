@@ -510,7 +510,7 @@ impl Log {
 pub fn pick_target(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut target: ResMut<Target>,

@@ -60,7 +60,7 @@ pub fn transfer_level(depth: u32) -> Option<u32> {
 fn class_change(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     input: Res<PlayerInput>,
     dp: Res<Datapack>,
     mut ui: ResMut<ClassChangeUi>,

@@ -147,7 +147,7 @@ fn pickup_line(data: &ItemData, item: u32, count: u64) -> String {
 fn choose_pickup(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform)>,
     hover: Res<bevy::picking::hover::HoverMap>,

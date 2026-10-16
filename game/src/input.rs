@@ -24,14 +24,48 @@ pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlayerInput>().add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems));
+        app.init_resource::<PlayerInput>().add_systems(
+            PreUpdate,
+            (activate_pads, gather_input).chain().after(bevy::input::InputSystems),
+        );
+    }
+}
+
+/// Marks a gamepad the game listens to. A pad counts only once one of its
+/// buttons was pressed: virtual pads, wheels and some mice or headsets show
+/// up as gamepads with an axis stuck off-centre, which would otherwise spin
+/// the camera and walk the hero on their own.
+#[derive(Component)]
+pub struct ActivePad;
+
+fn pad_name(name: Option<&Name>) -> &str {
+    name.map(|n| n.as_str()).unwrap_or("unnamed")
+}
+
+fn activate_pads(
+    mut commands: Commands,
+    connected: Query<Option<&Name>, Added<Gamepad>>,
+    pads: Query<(Entity, &Gamepad, Option<&Name>), Without<ActivePad>>,
+) {
+    for name in &connected {
+        info!("gamepad connected: {} (ignored until one of its buttons is pressed)", pad_name(name));
+    }
+    for (entity, pad, name) in &pads {
+        // Triggers are analog and can sit half-pressed on odd devices.
+        let pressed = pad
+            .get_just_pressed()
+            .any(|b| !matches!(b, GamepadButton::LeftTrigger2 | GamepadButton::RightTrigger2));
+        if pressed {
+            info!("gamepad active: {}", pad_name(name));
+            commands.entity(entity).insert(ActivePad);
+        }
     }
 }
 
 fn gather_input(
     mut input: ResMut<PlayerInput>,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     time: Res<Time>,
 ) {
     let mut dir = Vec2::ZERO;
