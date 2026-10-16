@@ -51,6 +51,12 @@ impl HotbarPages {
     }
 }
 
+/// Test switches (`testkeys.rs`): every class skill for free.
+#[derive(Resource, Default)]
+pub struct TestMode {
+    pub all_skills: bool,
+}
+
 /// A hotbar slot clicked with the mouse this frame (hotbar index).
 #[derive(Resource, Default)]
 pub struct HotbarPress(pub Option<usize>);
@@ -64,6 +70,7 @@ impl Plugin for SkillPlayPlugin {
             (learn_skills, cast_input, run_cast, tick_buffs, update_hotbar).chain().run_if(in_state(Phase::InWorld)),
         )
         .init_resource::<HotbarPages>()
+        .init_resource::<TestMode>()
         .init_resource::<HotbarPress>();
     }
 }
@@ -154,6 +161,11 @@ impl HeroSkills {
         self.cooldowns.get(&id).copied().filter(|c| c.0 > 0.0)
     }
 
+    /// Every skill ready at once (test key).
+    pub fn reset_cooldowns(&mut self) {
+        self.cooldowns.clear();
+    }
+
     /// The skill being cast: (skill id, seconds cast, cast time).
     pub fn casting(&self) -> Option<(u32, f32, f32)> {
         self.cast.as_ref().map(|c| (c.skill, c.time, c.total))
@@ -238,9 +250,10 @@ fn plan_cast(visual: Option<&SkillDef>, hero: &Hero, model: Option<&crate::skinn
 /// Gives the class tree's `autoGet` skills on reaching their level; the rest
 /// are learned for SP in the skill window (`skillwindow.rs`).
 /// `L2_ALL_SKILLS=1` (tests) gives every skill of the tree up to the hero's
-/// level for free, again after each class change.
+/// level for free, again after each class change; so does the F11 test key.
 fn learn_skills(
     mut commands: Commands,
+    test: Res<TestMode>,
     book: Res<SkillBook>,
     dp: Res<crate::datapack::Datapack>,
     mut log: ResMut<Log>,
@@ -252,11 +265,11 @@ fn learn_skills(
         return;
     };
     let class_id = stats.template.class_id;
-    if skills.last_level == stats.level && skills.last_sp == stats.sp && skills.last_class == class_id {
+    if skills.last_level == stats.level && skills.last_sp == stats.sp && skills.last_class == class_id && !test.is_changed() {
         return;
     }
     let tree = book.class_tree(class_id, &dp);
-    let all = std::env::var_os("L2_ALL_SKILLS").is_some();
+    let all = std::env::var_os("L2_ALL_SKILLS").is_some() || test.all_skills;
     let mut changed = true;
     while changed {
         changed = false;

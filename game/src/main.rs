@@ -29,6 +29,7 @@ mod save;
 mod services;
 mod skillfx;
 mod skillplay;
+mod testkeys;
 mod skillwindow;
 mod statswindow;
 mod skinned;
@@ -57,7 +58,7 @@ fn main() {
         app.add_plugins(viewer::ViewerPlugin { spec });
     } else {
         app.add_plugins((streaming::TileStreamPlugin, datapack::DatapackPlugin, mmo::MmoPlugin, rpg::RpgPlugin, skillplay::SkillPlayPlugin, items::ItemsPlugin, dialog::DialogPlugin, classchange::ClassChangePlugin, save::SavePlugin, npcskills::NpcSkillsPlugin, skillwindow::SkillWindowPlugin, loot::LootPlugin, statswindow::StatusWindowPlugin, worldmap::WorldMapPlugin));
-        app.add_plugins((l2ui::L2UiPlugin, l2ui_bind::L2UiBindPlugin, l2ui_windows::L2UiWindowsPlugin, lobby::LobbyPlugin, hotbar::HotbarPlugin));
+        app.add_plugins((l2ui::L2UiPlugin, l2ui_bind::L2UiBindPlugin, l2ui_windows::L2UiWindowsPlugin, lobby::LobbyPlugin, hotbar::HotbarPlugin, testkeys::TestKeysPlugin));
     }
     app.run();
 }

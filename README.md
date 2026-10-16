@@ -99,6 +99,10 @@ teleports and the quest pages. What is playable:
   place; framed windows have the client's X button.
   Without `interface.xdat` the game falls back to plain panels.
 
+Test keys in the world: F9 one level up (Shift+F9 ten), F10 +1 000 000 SP and
++10 000 000 Adena, F11 every class skill up to the level for free (toggle; it
+follows level-ups and class changes), F12 full HP / MP and all skills ready.
+
 Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
 `L2_DEBUG_NPC=1`, `L2_START="x,y,z"`, `L2_LEVEL=<n>` (new characters), `L2_ALL_SKILLS=1`
 (every skill of the class tree up to the current level, free), `L2_CLASS_PICK=<i>`,
