@@ -452,8 +452,8 @@ fn move_hero(
     if stats.attacking && !moving {
         return; // combat drives the animation
     }
-    if !moving && skills.is_some_and(|s| s.casting().is_some()) {
-        return; // so does casting (moving interrupts it)
+    if !moving && skills.is_some_and(|s| s.casting().is_some() || s.approaching()) {
+        return; // so do casting and running up to cast (moving interrupts them)
     }
     // Let the stand-up clip finish before idling.
     if !moving {

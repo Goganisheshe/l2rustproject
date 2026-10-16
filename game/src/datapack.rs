@@ -577,6 +577,10 @@ pub struct SkillEffectDef {
     pub mode: String,
     /// Teleport destination (Unreal units).
     pub pos: Option<[f32; 3]>,
+    /// NPC a `Summon` effect calls, per skill level.
+    pub npc: Levelled,
+    /// Seconds a summon stays (`lifeTime`); 0 = until dismissed.
+    pub life: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -594,14 +598,34 @@ pub struct ServerSkill {
     pub abnormal_time: f32,
     pub mp: Levelled,
     pub effects: Vec<SkillEffectDef>,
+    /// `affectScope`: SINGLE, RANGE (around the target), POINT_BLANK (around
+    /// the caster), FAN / SQUARE (in front of the caster)...
+    pub scope: String,
+    /// `affectRange`, Unreal units.
+    pub affect_range: f32,
 }
 
 impl ServerSkill {
     pub fn is_active(&self) -> bool {
         self.operate.starts_with('A') || self.operate.starts_with("CA") || self.operate.starts_with("DA")
     }
+    /// Aimed at an enemy (`targetType` ENEMY / ENEMY_ONLY), or dealing damage.
     pub fn is_offensive(&self) -> bool {
-        self.effects.iter().any(|e| matches!(e.name.as_str(), "PhysicalDamage" | "MagicalDamage" | "DamOverTime" | "MagicalAttackMp" | "HpDrain"))
+        self.needs_enemy() || self.effects.iter().any(|e| damage_kind(&e.name).is_some())
+    }
+
+    /// Needs an enemy target.
+    pub fn needs_enemy(&self) -> bool {
+        self.target.starts_with("ENEMY") && self.target != "ENEMY_NOT"
+    }
+}
+
+/// How an effect deals damage: `Some(true)` physical, `Some(false)` magical.
+pub fn damage_kind(effect: &str) -> Option<bool> {
+    match effect {
+        "PhysicalDamage" | "FatalBlow" | "Backstab" | "EnergyDamage" | "PhysicalSoulDamage" | "PhysicalDamageHpLink" | "Lethal" => Some(true),
+        "MagicalDamage" | "MagicalDamageMp" | "MagicalDamageRange" | "MagicalAttackMp" | "MagicalSoulAttack" | "HpDrain" | "DamOverTime" | "DeathLink" => Some(false),
+        _ => None,
     }
 }
 
@@ -661,6 +685,8 @@ pub fn load_skills(root: &Path) -> SkillBook {
                                 let v = |t: &str| child(c, t)?.text()?.trim().parse::<f32>().ok();
                                 Some([v("x")?, v("y")?, v("z")?])
                             })(),
+                            npc: levelled(c, "npcId"),
+                            life: levelled(c, "lifeTime").at(1),
                         })
                         .collect()
                 })
@@ -680,6 +706,8 @@ pub fn load_skills(root: &Path) -> SkillBook {
                     abnormal_time: levelled(s, "abnormalTime").at(1),
                     mp: levelled(s, "mpConsume"),
                     effects,
+                    scope: t("affectScope"),
+                    affect_range: levelled(s, "affectRange").at(1),
                 },
             );
         }

@@ -1,4 +1,6 @@
-//! Test keys for trying high-level characters and skills:
+//! Test keys for trying high-level characters, skills and items:
+//! - F8: one of every item of the datapack (100 of stackable ones) into the
+//!   inventory; Ctrl+F8 empties the bag (what is worn stays);
 //! - F9: one level up (Shift+F9: ten);
 //! - F10: 1 000 000 SP and 10 000 000 Adena;
 //! - F11: every skill of the class tree up to the hero's level, for free
@@ -11,7 +13,7 @@
 use bevy::prelude::*;
 
 use crate::datapack::Datapack;
-use crate::items::{Inventory, ADENA};
+use crate::items::{Inventory, ItemData, ADENA};
 use crate::mmo::{Hero, Phase};
 use crate::rpg::{HeroStats, Log};
 use crate::skillplay::{HeroSkills, TestMode};
@@ -27,12 +29,35 @@ impl Plugin for TestKeysPlugin {
 fn test_keys(
     keys: Res<ButtonInput<KeyCode>>,
     dp: Res<Datapack>,
+    items: Res<ItemData>,
     mut test: ResMut<TestMode>,
     mut log: ResMut<Log>,
     hero: Single<(&mut HeroStats, Option<&mut Inventory>, Option<&mut HeroSkills>), With<Hero>>,
 ) {
-    let (mut stats, inv, skills) = hero.into_inner();
+    let (mut stats, mut inv, skills) = hero.into_inner();
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if keys.just_pressed(KeyCode::F8) {
+        if let Some(inv) = inv.as_mut() {
+            if ctrl {
+                let worn: Vec<u32> = inv.equipped.values().copied().collect();
+                inv.items.retain(|id, _| worn.contains(id));
+                inv.auto_shots.clear();
+                log.push("[test] Bag emptied");
+            } else {
+                let mut added = 0;
+                for t in items.items.values() {
+                    let n = if t.equippable() { 1 } else { 100 };
+                    let have = inv.items.entry(t.id).or_insert(0);
+                    if *have < n {
+                        *have = n;
+                        added += 1;
+                    }
+                }
+                log.push(format!("[test] {added} items added ({} kinds in the bag; mouse wheel scrolls the inventory)", inv.items.len()));
+            }
+        }
+    }
     if keys.just_pressed(KeyCode::F9) {
         let max = dp.exp.len().saturating_sub(1).max(1) as u32;
         let level = (stats.level + if shift { 10 } else { 1 }).min(max);
@@ -49,7 +74,7 @@ fn test_keys(
     }
     if keys.just_pressed(KeyCode::F10) {
         stats.sp += 1_000_000;
-        if let Some(mut inv) = inv {
+        if let Some(inv) = inv.as_mut() {
             *inv.items.entry(ADENA).or_insert(0) += 10_000_000;
         }
         log.push("[test] +1 000 000 SP, +10 000 000 Adena");

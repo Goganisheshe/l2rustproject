@@ -17,6 +17,7 @@ pub struct L2UiWindowsPlugin;
 impl Plugin for L2UiWindowsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StatusOpen>()
+            .init_resource::<InvScroll>()
             .init_resource::<OptionsOpen>()
             .init_resource::<HelpOpen>()
             .init_resource::<GameOptions>()
@@ -344,6 +345,14 @@ const EQUIP_SLOTS: [(&str, &str); 16] = [
 #[derive(Component)]
 struct InvContent;
 
+/// First shown row of the inventory grid (mouse wheel over it scrolls).
+#[derive(Resource, Default)]
+struct InvScroll(usize);
+
+/// The grid already scrolls.
+#[derive(Component)]
+struct InvScrollBound;
+
 #[allow(clippy::too_many_arguments)]
 fn fill_inventory(
     mut commands: Commands,
@@ -355,18 +364,32 @@ fn fill_inventory(
     placed: Query<(&Node, &ChildOf), Without<InvContent>>,
     mut texts: Query<(&UiCtrl, &mut Text), With<CtrlText>>,
     content: Query<Entity, With<InvContent>>,
-    mut shown: Local<Option<(Vec<(u32, u64)>, Vec<u32>, usize)>>,
+    (mut scroll, bound): (ResMut<InvScroll>, Query<(), With<InvScrollBound>>),
+    mut shown: Local<Option<(Vec<(u32, u64)>, Vec<u32>, usize, usize)>>,
     mut icons: Local<HashMap<String, Option<Handle<Image>>>>,
 ) {
     let Some(inv) = inv else { return };
     let grid = ctrls.iter().find(|(_, c, _)| c.window == "InventoryWnd" && c.name == "InventoryItem");
-    let Some((grid_e, _, Some(grid))) = grid else {
+    let Some((grid_e, grid_ctrl, Some(grid))) = grid else {
         *shown = None;
         return;
     };
+    // The icons sit on the window, so the whole window takes the wheel.
+    let window_e = placed.get(grid_e).map(|(_, p)| p.parent()).unwrap_or(grid_e);
+    if !bound.contains(window_e) {
+        commands.entity(window_e).insert(InvScrollBound).observe(|e: On<bevy::picking::events::PointerScroll>, mut scroll: ResMut<InvScroll>| {
+            scroll.0 = if e.y > 0.0 { scroll.0.saturating_sub(1) } else { scroll.0 + 1 };
+        });
+    }
     let items: Vec<(u32, u64)> = inv.items.iter().filter(|(id, _)| !inv.equipped.values().any(|e| e == *id)).map(|(k, v)| (*k, *v)).collect();
     let equipped: Vec<u32> = inv.equipped.values().copied().collect();
-    let state = (items.clone(), equipped.clone(), inv.auto_shots.len());
+    // Only the rows that fit the grid are drawn, from the scrolled one.
+    let cols = grid.cols.max(1) as usize;
+    let rows = (((grid_ctrl.size.y - grid.offset.y + grid.gap.y) / (grid.icon.y + grid.gap.y)).floor() as usize).max(1);
+    let total_rows = items.len().div_ceil(cols);
+    scroll.0 = scroll.0.min(total_rows.saturating_sub(rows));
+    let first = scroll.0 * cols;
+    let state = (items.clone(), equipped.clone(), inv.auto_shots.len(), first);
     if shown.as_ref() == Some(&state) {
         return;
     }
@@ -413,8 +436,8 @@ fn fill_inventory(
     if let Ok((node, parent)) = placed.get(grid_e) {
         let origin = Vec2::new(px(node.left), px(node.top));
         debug!("inventory grid at {origin} {:?}", (grid.cols, grid.icon, grid.gap, grid.offset));
-        for (i, (id, count)) in items.iter().enumerate() {
-            put(&mut commands, parent.parent(), origin + grid.slot(i as u32), grid.icon, *id, *count, inv.auto_shots.contains(id));
+        for (i, (id, count)) in items.iter().enumerate().skip(first).take(rows * cols) {
+            put(&mut commands, parent.parent(), origin + grid.slot((i - first) as u32), grid.icon, *id, *count, inv.auto_shots.contains(id));
         }
     }
     for (ctrl_name, slot) in EQUIP_SLOTS {
@@ -432,7 +455,10 @@ fn fill_inventory(
         }
         let v = match c.name.as_str() {
             "AdenaText" => adena.to_string(),
-            "ItemCount" => format!("({}/80)", inv.items.len()),
+            "ItemCount" => match total_rows > rows {
+                true => format!("({}) {}/{}", inv.items.len(), scroll.0 + 1, total_rows - rows + 1),
+                false => format!("({}/80)", inv.items.len()),
+            },
             _ => continue,
         };
         t.0 = v;

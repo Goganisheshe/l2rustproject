@@ -67,7 +67,7 @@ impl Plugin for SkillPlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (learn_skills, cast_input, run_cast, tick_buffs, update_hotbar).chain().run_if(in_state(Phase::InWorld)),
+            (learn_skills, cast_input, approach_target, run_cast, tick_buffs, update_hotbar).chain().run_if(in_state(Phase::InWorld)),
         )
         .init_resource::<HotbarPages>()
         .init_resource::<TestMode>()
@@ -87,6 +87,8 @@ pub struct HeroSkills {
     cast: Option<Cast>,
     /// Skills gone off whose projectile is still flying.
     pending: Vec<PendingHit>,
+    /// A skill waiting for the hero to run into range of its target.
+    approach: Option<(u32, Entity)>,
     last_level: u32,
     last_sp: u64,
     last_class: u32,
@@ -164,6 +166,11 @@ impl HeroSkills {
     /// Every skill ready at once (test key).
     pub fn reset_cooldowns(&mut self) {
         self.cooldowns.clear();
+    }
+
+    /// Running to a target to cast a skill on it.
+    pub fn approaching(&self) -> bool {
+        self.approach.is_some()
     }
 
     /// The skill being cast: (skill id, seconds cast, cast time).
@@ -358,7 +365,12 @@ fn cast_input(
             skills.cooldown(*id).is_none() && book.skills.get(id).is_some_and(|s| s.is_offensive())
         });
     }
-    let Some(id) = slot.map(|i| skills.slot(i)).filter(|id| *id != 0) else { return };
+    // A new key press replaces a skill waiting for the hero to get in range.
+    let pressed = slot.map(|i| skills.slot(i)).filter(|id| *id != 0);
+    if pressed.is_some() {
+        skills.approach = None;
+    }
+    let Some(id) = pressed.or(skills.approach.map(|a| a.0)) else { return };
     let Some(def) = book.skills.get(&id) else { return };
     let level = skills.learned.get(&id).copied().unwrap_or(1);
     if let Some((left, _)) = skills.cooldown(id) {
@@ -370,22 +382,32 @@ fn cast_input(
         log.push(format!("Not enough MP for {}", def.name));
         return;
     }
-    let offensive = def.is_offensive();
+    let offensive = def.needs_enemy();
     let tgt = if offensive {
         match target.0.and_then(|e| npcs.get(e).ok().map(|n| (e, n))) {
             Some((e, (n, t))) if n.state != NpcState::Dead => {
-                let reach = (def.cast_range.max(40.0) + n.template.radius) * UU_TO_M + 0.5;
-                if t.translation.distance(tr.translation) > reach {
-                    log.push(format!("{}: target is too far", def.name));
+                // Cast range plus both collision radii; melee skills reach at
+                // least as far as the weapon.
+                let reach = ((def.cast_range.max(0.0) + n.template.radius + HERO_RADIUS) * UU_TO_M).max(stats.atk_range + n.template.radius * UU_TO_M);
+                if t.translation.with_y(0.0).distance(tr.translation.with_y(0.0)) > reach {
+                    // Out of reach: run up to the target first (`approach_target`).
+                    if skills.approach.is_none() {
+                        move_to.0 = None;
+                        stats.attacking = false;
+                    }
+                    skills.approach = Some((id, e));
                     return;
                 }
+                skills.approach = None;
                 Some(e)
             }
             _ if target.0 == Some(hero_e) => {
+                skills.approach = None;
                 log.push(format!("{}: invalid target", def.name));
                 return;
             }
             _ => {
+                skills.approach = None;
                 log.push(format!("{}: no target", def.name));
                 return;
             }
@@ -405,6 +427,36 @@ fn cast_input(
     skills.cast = Some(Cast { skill: id, level, target: tgt, time: 0.0, total, stage: usize::MAX, fired: false, mp, plan: Vec::new(), release_at: 0.0 });
 }
 
+/// Runs the hero toward the target of a skill cast out of range; moving,
+/// a click on the ground or the target dying cancels it.
+#[allow(clippy::too_many_arguments)]
+fn approach_target(
+    time: Res<Time>,
+    input: Res<crate::input::PlayerInput>,
+    move_to: Res<crate::mmo::MoveTarget>,
+    hero: Single<(&Hero, &mut Transform, &HeroStats, &mut HeroSkills)>,
+    npcs: Query<(&Npc, &Transform), Without<Hero>>,
+    mut anims: Query<&mut Animated>,
+) {
+    let (hero, mut tr, stats, mut skills) = hero.into_inner();
+    let Some((_, target)) = skills.approach else { return };
+    let alive = npcs.get(target).ok().filter(|(n, _)| n.state != NpcState::Dead);
+    let cancel = input.move_dir.length() > 0.1 || move_to.0.is_some() || stats.hp <= 0.0 || skills.cast.is_some();
+    let Some((_, t)) = alive.filter(|_| !cancel) else {
+        skills.approach = None;
+        return;
+    };
+    let to = (t.translation - tr.translation).with_y(0.0);
+    if to.length() < 0.05 {
+        return;
+    }
+    tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
+    tr.translation += to.normalize() * (stats.run_speed * UU_TO_M * time.delta_secs()).min(to.length());
+    if let Ok(mut a) = anims.get_mut(hero.actor) {
+        a.play(&hero.clips("run", "run").each_ref().map(String::as_str), true);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_cast(
     mut commands: Commands,
@@ -418,9 +470,9 @@ fn run_cast(
     mut assets: FxAssets,
     items: Res<crate::items::ItemData>,
     hero: Single<(Entity, &Hero, &mut Transform, &mut HeroStats, &mut HeroSkills, Option<&mut crate::items::Inventory>)>,
-    mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
+    mut npcs: Query<(Entity, &mut Npc, &Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
-    (input, move_to): (Res<crate::input::PlayerInput>, Res<crate::mmo::MoveTarget>),
+    (input, move_to, mut summons): (Res<crate::input::PlayerInput>, Res<crate::mmo::MoveTarget>, ResMut<crate::rpg::SummonRequests>),
 ) {
     let dt = time.delta_secs();
     let (hero_e, hero, mut tr, mut stats, mut skills, inv) = hero.into_inner();
@@ -443,7 +495,7 @@ fn run_cast(
         let caster = hero_pawn(hero_e, hero, &tr, &anims);
         let target = hit.target.and_then(|e| npc_pawn(e, &npcs)).unwrap_or(caster);
         land(hit, &def, visual.as_deref(), &caster, &target, &mut commands, &mut cache, &mut lib, &mut assets, &anims);
-        apply_effects(&def, hit.level, hit.target, &mut stats, &mut npcs, &dp, &mut log, hit.shot);
+        apply_effects(&def, hit.level, hit.target, &mut stats, &tr, &mut npcs, &dp, &mut log, hit.shot, &mut summons);
     }
     let Some(mut cast) = skills.cast.take() else { return };
     // Moving (or dying) before the skill goes off interrupts the cast.
@@ -457,7 +509,7 @@ fn run_cast(
     }
     let Some(def) = book.skills.get(&cast.skill).cloned() else { return };
     let visual: Option<Arc<SkillDef>> = data.visuals.get(&cast.skill).cloned();
-    let target_pos = cast.target.and_then(|e| npcs.get(e).ok()).map(|(_, t)| t.translation);
+    let target_pos = cast.target.and_then(|e| npcs.get(e).ok()).map(|(_, _, t)| t.translation);
     if let Some(p) = target_pos {
         let to = (p - tr.translation).with_y(0.0);
         if to.length() > 0.01 {
@@ -510,12 +562,17 @@ fn run_cast(
             skills.pending.push(hit);
         } else {
             land(hit, &def, visual.as_deref(), &caster, &target, &mut commands, &mut cache, &mut lib, &mut assets, &anims);
-            apply_effects(&def, hit.level, hit.target, &mut stats, &mut npcs, &dp, &mut log, hit.shot);
+            apply_effects(&def, hit.level, hit.target, &mut stats, &tr, &mut npcs, &dp, &mut log, hit.shot, &mut summons);
         }
     }
     if cast.time >= cast.total {
         if let Ok(mut a) = anims.get_mut(hero.actor) {
             a.speed = 1.0;
+        }
+        // Fighters keep hitting the target after a skill, as in the client.
+        let magic = visual.as_ref().is_some_and(|v| v.magic);
+        if !magic && def.needs_enemy() && cast.target.and_then(|e| npcs.get(e).ok()).is_some_and(|(_, n, _)| n.state != NpcState::Dead) {
+            stats.attacking = true;
         }
         let reuse = def.reuse.max(0.5);
         skills.cooldowns.insert(cast.skill, (reuse, reuse));
@@ -541,8 +598,8 @@ fn hero_pawn(e: Entity, hero: &Hero, tr: &Transform, anims: &Query<&mut Animated
     Pawn { entity: e, actor: Some(hero.actor), feet: tr.translation, rotation: tr.rotation, radius: HERO_RADIUS * UU_TO_M, half_height }
 }
 
-fn npc_pawn(e: Entity, npcs: &Query<(&mut Npc, &Transform), Without<Hero>>) -> Option<Pawn> {
-    let (n, t) = npcs.get(e).ok()?;
+fn npc_pawn(e: Entity, npcs: &Query<(Entity, &mut Npc, &Transform), Without<Hero>>) -> Option<Pawn> {
+    let (_, n, t) = npcs.get(e).ok()?;
     Some(Pawn {
         entity: e,
         actor: n.actor,
@@ -574,23 +631,65 @@ fn land(
     }
 }
 
+/// Monsters a skill hits: its target, or everyone in its area
+/// (`affectScope` RANGE around the target, POINT_BLANK around the hero,
+/// FAN / SQUARE in front of him).
+fn skill_victims(def: &ServerSkill, primary: Option<Entity>, hero: &Transform, npcs: &Query<(Entity, &mut Npc, &Transform), Without<Hero>>) -> Vec<Entity> {
+    let alive = |n: &Npc| n.state != NpcState::Dead && n.template.is_monster();
+    let radius = def.affect_range.max(0.0) * UU_TO_M;
+    let forward = (hero.rotation * Vec3::X).with_y(0.0).normalize_or(Vec3::X);
+    let around = |center: Vec3, front_only: bool| -> Vec<Entity> {
+        npcs.iter()
+            .filter(|(_, n, t)| {
+                let to = (t.translation - center).with_y(0.0);
+                alive(n) && to.length() <= radius + n.template.radius * UU_TO_M && (!front_only || to.normalize_or_zero().dot(forward) > 0.3)
+            })
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    let mut out = match def.scope.as_str() {
+        "RANGE" | "RANGE_SORT_BY_HP" if radius > 0.0 => {
+            let center = primary.and_then(|e| npcs.get(e).ok()).map_or(hero.translation, |(_, _, t)| t.translation);
+            around(center, false)
+        }
+        "POINT_BLANK" if radius > 0.0 => around(hero.translation, false),
+        "FAN" | "SQUARE" | "SQUARE_PB" if radius > 0.0 => around(hero.translation, true),
+        _ => Vec::new(),
+    };
+    if let Some(p) = primary.filter(|p| !out.contains(p) && npcs.get(*p).is_ok_and(|(_, n, _)| alive(n))) {
+        out.insert(0, p);
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_effects(
     def: &ServerSkill,
     level: u32,
     target: Option<Entity>,
     stats: &mut HeroStats,
-    npcs: &mut Query<(&mut Npc, &Transform), Without<Hero>>,
+    hero: &Transform,
+    npcs: &mut Query<(Entity, &mut Npc, &Transform), Without<Hero>>,
     dp: &Datapack,
     log: &mut Log,
     shot: f32,
+    summons: &mut crate::rpg::SummonRequests,
 ) {
     let mut rng = rand::rng();
+    let victims = skill_victims(def, target, hero, npcs);
+    // Stat effects of skills aimed at enemies are debuffs on them, not buffs.
+    let on_enemy = def.needs_enemy();
     for e in &def.effects {
         let power = e.power.at(level);
-        match e.name.as_str() {
-            "PhysicalDamage" | "MagicalDamage" => {
-                let Some((mut npc, _)) = target.and_then(|t| npcs.get_mut(t).ok()) else { continue };
-                let dmg = if e.name == "PhysicalDamage" {
+        if let Some(physical) = crate::datapack::damage_kind(&e.name) {
+            // Damage over time: its ticks at once.
+            let power = if e.name == "DamOverTime" { power * 3.0 } else { power };
+            for v in &victims {
+                let Ok((_, mut npc, _)) = npcs.get_mut(*v) else { continue };
+                if npc.state == NpcState::Dead {
+                    continue;
+                }
+                let dmg = if physical {
                     crate::formulas::physical(&stats.combat(), &npc.template.combat(), power, shot, true, &mut rng).map_or(0.0, |d| d.0)
                 } else {
                     crate::formulas::magical(&stats.combat(), &npc.template.combat(), power, shot, &mut rng)
@@ -598,10 +697,26 @@ fn apply_effects(
                 npc.hp -= dmg;
                 npc.provoked = true;
                 log.push(format!("{} hits {} for {:.0}", def.name, npc.template.name, dmg));
+                if e.name == "HpDrain" {
+                    stats.hp = (stats.hp + dmg * 0.2).min(stats.max_hp);
+                }
                 if npc.hp <= 0.0 {
                     award_kill(&mut npc, stats, dp, log);
                 }
             }
+            if victims.is_empty() {
+                log.push(format!("{}: nobody in reach", def.name));
+            }
+            continue;
+        }
+        match e.name.as_str() {
+            "Summon" => {
+                let id = e.npc.at(level) as u32;
+                if id > 0 {
+                    summons.0.push((id, e.life));
+                }
+            }
+            _ if on_enemy => {}
             "Heal" => {
                 stats.hp = (stats.hp + power).min(stats.max_hp);
                 log.push(format!("{} restores {:.0} HP", def.name, power));

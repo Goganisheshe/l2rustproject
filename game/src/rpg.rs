@@ -35,6 +35,7 @@ impl Plugin for RpgPlugin {
         app.init_resource::<NpcSpawner>()
             .init_resource::<ReviveClicked>()
             .init_resource::<SpawnRequests>()
+            .init_resource::<SummonRequests>()
             .init_resource::<Target>()
             .init_resource::<Log>()
             .add_systems(
@@ -46,6 +47,8 @@ impl Plugin for RpgPlugin {
                     pick_target,
                     hero_attack,
                     npc_ai,
+                    spawn_summons,
+                    servitor_ai,
                     npc_respawn,
                     hero_regen_and_death,
                     update_hud,
@@ -419,6 +422,132 @@ fn spawn_at(
     Some(e)
 }
 
+/// A servitor summoned by the hero: follows him and fights his target.
+#[derive(Component)]
+pub struct Servitor {
+    /// Seconds left; `None` stays until another one is summoned.
+    life: Option<f32>,
+    atk_timer: f32,
+}
+
+/// `Summon` skill effects: (NPC id, life time in seconds, 0 = unlimited).
+#[derive(Resource, Default)]
+pub struct SummonRequests(pub Vec<(u32, f32)>);
+
+/// Calls summoned servitors beside the hero; one at a time, as in Classic.
+#[allow(clippy::too_many_arguments)]
+fn spawn_summons(
+    mut commands: Commands,
+    mut req: ResMut<SummonRequests>,
+    mut spawner: ResMut<NpcSpawner>,
+    dp: Res<Datapack>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
+    mut log: ResMut<Log>,
+    hero: Single<&Transform, With<Hero>>,
+    old: Query<Entity, With<Servitor>>,
+) {
+    for (id, life) in std::mem::take(&mut req.0) {
+        let Some(t) = dp.npcs.get(&id) else {
+            log.push(format!("Summon: no NPC {id} in the datapack."));
+            continue;
+        };
+        let name = t.name.clone();
+        for e in &old {
+            commands.entity(e).despawn();
+        }
+        // Beside the hero, a little behind.
+        let pos = hero.translation + hero.rotation * Vec3::new(-1.2, 0.0, 1.2);
+        if let Some(e) = spawn_at(&mut commands, &mut spawner, &dp, &streamer, &world, id, crate::streaming::bevy_to_ue(pos), 0, NO_RESPAWN, None) {
+            commands.entity(e).insert(Servitor { life: (life > 0.0).then_some(life), atk_timer: 0.0 });
+            log.push(format!("{name} is summoned."));
+        }
+    }
+}
+
+/// Servitors follow the hero and attack the monster he targets once it is
+/// in the fight (provoked or chasing him).
+#[allow(clippy::too_many_arguments)]
+fn servitor_ai(
+    mut commands: Commands,
+    time: Res<Time>,
+    dp: Res<Datapack>,
+    mut log: ResMut<Log>,
+    target: Res<Target>,
+    hero: Single<(&Transform, &mut HeroStats), (With<Hero>, Without<Servitor>)>,
+    mut servitors: Query<(Entity, &mut Npc, &mut Transform, &mut Servitor), Without<Hero>>,
+    mut foes: Query<(&mut Npc, &Transform), (Without<Servitor>, Without<Hero>)>,
+    mut anims: Query<&mut Animated>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
+) {
+    let dt = time.delta_secs();
+    let (hero_tr, mut stats) = hero.into_inner();
+    let mut rng = rand::rng();
+    for (e, mut npc, mut tr, mut serv) in &mut servitors {
+        if let Some(l) = serv.life.as_mut() {
+            *l -= dt;
+            if *l <= 0.0 {
+                log.push(format!("{} has left.", npc.template.name));
+                commands.entity(e).despawn();
+                continue;
+            }
+        }
+        if npc.state == NpcState::Dead || stats.hp <= 0.0 {
+            continue;
+        }
+        let mut anim = npc.actor.and_then(|a| anims.get_mut(a).ok());
+        let foe = target.0.filter(|t| {
+            foes.get(*t).is_ok_and(|(n, _)| n.state != NpcState::Dead && n.template.is_monster() && (n.provoked || n.state == NpcState::Chase))
+        });
+        let (goal, reach) = match foe.and_then(|f| foes.get(f).ok()) {
+            Some((n, t)) => (t.translation, (npc.template.atk_range + npc.template.radius + n.template.radius) * UU_TO_M),
+            // Heel: a little behind the hero.
+            None => (hero_tr.translation + hero_tr.rotation * Vec3::new(-1.2, 0.0, 1.2), 0.6),
+        };
+        let to = (goal - tr.translation).with_y(0.0);
+        if to.length() > 0.05 {
+            tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
+        }
+        if to.length() > reach {
+            // Run to catch up, walk the last steps.
+            let speed = if to.length() > 3.0 || foe.is_some() { npc.template.run_speed } else { npc.template.walk_speed };
+            tr.translation += to.normalize() * (speed * UU_TO_M * dt).min(to.length());
+            tr.translation.y = crate::mmo::settle(tr.translation, &streamer, &world);
+            if let Some(a) = anim.as_mut() {
+                a.play(if speed == npc.template.run_speed { &["Run", "Walk"] } else { &["Walk", "Run"] }, true);
+            }
+            continue;
+        }
+        let Some(f) = foe else {
+            if let Some(a) = anim.as_mut() {
+                a.play(&["Wait"], true);
+            }
+            continue;
+        };
+        serv.atk_timer -= dt;
+        if serv.atk_timer > 0.0 {
+            if let Some(a) = anim.as_mut() {
+                if a.finished() || a.looping {
+                    a.play(&["AtkWait", "Wait"], true);
+                }
+            }
+            continue;
+        }
+        serv.atk_timer = 500.0 / npc.template.atk_speed.max(1.0);
+        if let Some(a) = anim.as_mut() {
+            a.restart(&["atk01", "Atk01"], false);
+        }
+        let Ok((mut victim, _)) = foes.get_mut(f) else { continue };
+        let Some((dmg, _)) = crate::formulas::physical(&npc.template.combat(), &victim.template.combat(), 0.0, 1.0, false, &mut rng) else { continue };
+        victim.hp -= dmg;
+        victim.provoked = true;
+        if victim.hp <= 0.0 {
+            award_kill(&mut victim, &mut stats, &dp, &mut log);
+        }
+    }
+}
+
 /// Script spawns (`SpawnRequests`).
 fn spawn_requested(
     mut commands: Commands,
@@ -524,7 +653,7 @@ pub fn pick_target(
     camera: Single<(&Camera, &GlobalTransform)>,
     mut target: ResMut<Target>,
     hero: Single<(Entity, &Transform, &mut HeroStats), With<Hero>>,
-    npcs: Query<(Entity, &Npc, &Transform), Without<Hero>>,
+    npcs: Query<(Entity, &Npc, &Transform), (Without<Hero>, Without<Servitor>)>,
     mut talk: ResMut<crate::dialog::TalkRequest>,
     mut move_to: ResMut<crate::mmo::MoveTarget>,
     hover: Res<bevy::picking::hover::HoverMap>,
