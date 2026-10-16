@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use ue2::Package;
 
+mod skin;
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -11,6 +13,7 @@ fn main() -> Result<()> {
         Some("obj") => obj(&args[2], &args[3], &args[4]),
         Some("materials") => materials(&args[2], &args[3], &args[4]),
         Some("bones") => skel_bones(&args[2], &args[3], &args[4]),
+        Some("skin") => skin::run(&args[2], &args[3], args.get(4).map(String::as_str)),
         Some("alpha") => mat_alpha(&args[2], &args[3], &args[4]),
         Some("props") => dump_props(&args[2], &args[3]),
         Some("effect") => dump_effect(&args[2], &args[3]),
@@ -109,7 +112,7 @@ fn main() -> Result<()> {
         _ => bail!(
             "usage: l2tool info <pkg>... | names <pkg> | textures <pkg> <dir> | scan <dir>... | \
              obj <pkg> <mesh> <out.obj> | materials <client> <pkg> <mesh> | \
-             ribbons <pkg>... | hex <pkg> <export> [n]"
+             skin <client> <out dir> [mesh filter] | ribbons <pkg>... | hex <pkg> <export> [n]"
         ),
     }
 }

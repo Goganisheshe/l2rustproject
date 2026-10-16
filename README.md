@@ -147,6 +147,7 @@ cargo run --release -p l2tool -- scan <dir>...             # open every package,
 cargo run --release -p l2tool -- obj <package> <mesh> <out.obj> # static mesh to OBJ
 cargo run --release -p l2tool -- materials <client> <package> <mesh>  # static or skeletal
 cargo run --release -p l2tool -- bones <client> <package> <skeletal mesh>
+cargo run --release -p l2tool -- skin <client> <out dir> [filter] # dump meshes with geometry only in SkinningData
 cargo run --release -p l2tool -- alpha <client> <package> <material>
 cargo run --release -p l2tool -- dat <client>                # decode skillgrp/npcgrp/... and summarize
 cargo run --release -p l2tool -- props <package> <export>     # tagged properties
@@ -176,9 +177,16 @@ cargo run --release -p l2tool -- hex <package> <export> [n]
   self-describing lazy-array header instead of hard-coding each layout.
 - `systextures/l2ui_ct2.utx` uses an unknown wrapper (`FF ED FA CE`).
 - Coverage over the whole client: 1441/1442 packages, 75 434/75 434 textures,
-  15 276/15 276 static meshes, 11 489/11 517 skeletal meshes, 1 863/1 863
-  animations. The 28 skeletal meshes left keep soft-skinned geometry only in
-  `SkinningData`, which is not decoded yet.
+  15 276/15 276 static meshes, 11 517/11 517 skeletal meshes, 1 863/1 863
+  animations.
+- 28 skeletal meshes (Istina, the Earth Worms, Trajan...) keep their soft-skinned
+  part only in LOD 0's `SkinningData`: one record per wedge, ended by
+  `0xFFFFFFFF`. A new point is 1-4 influence words (bone * 6 in bits 0-11,
+  weight * 65535 in bits 12-27; the first word's bits 28-29 count the rest and
+  bit 31 caches the point for sharing) followed by U, V floats; points come in
+  `SkinPoints` order. A word with top nibble `0xF` reuses cached point
+  `(low bits) / 6`, then U, V. Checked against 1 868 meshes that carry both
+  this stream and Lineage wedges (`ue2::skel::decode_skinning`).
 - Bone math: stored child-bone quaternions are conjugated relative to the
   root (ActorX convention). Unreal→Bevy axes: (x, y, z) → (x, z, y),
   quaternions (x, y, z, w) → (−x, −z, −y, w). 1 UU = 1/27 m.

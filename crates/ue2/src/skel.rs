@@ -4,6 +4,8 @@
 //! influences) when present. Newer Lineage packages leave those empty and keep
 //! the geometry only in LOD 0 as "Lineage wedges" (position, normal, UV and
 //! four bone weights per wedge); we rebuild the mesh from that instead.
+//! A few keep their soft-skinned part only in LOD 0's `SkinningData` stream
+//! (see `decode_skinning`).
 
 use crate::props::Properties;
 use crate::{Error, ObjectRef, Package, Reader};
@@ -72,12 +74,20 @@ fn lazy(r: &mut Reader) -> Result<(), Error> {
     Ok(())
 }
 
-struct Section {
-    material: u16,
-    bone: u16,
-    first_face: u16,
-    num_faces: u16,
-    bone_map: Vec<i32>,
+/// `FSkelMeshSection` of a LOD model.
+#[derive(Debug, Clone)]
+pub struct Section {
+    pub material: u16,
+    pub min_stream_index: u16,
+    pub min_wedge: u16,
+    pub max_wedge: u16,
+    pub num_stream_indices: u16,
+    pub bone: u16,
+    pub unknown: u16,
+    pub first_face: u16,
+    pub num_faces: u16,
+    /// Section bone index -> mesh bone index (Lineage only).
+    pub bone_map: Vec<i32>,
 }
 
 fn read_sections(r: &mut Reader, lineage_map: bool) -> Result<Vec<Section>, Error> {
@@ -85,12 +95,12 @@ fn read_sections(r: &mut Reader, lineage_map: bool) -> Result<Vec<Section>, Erro
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let material = r.u16()?;
-        r.u16()?; // min stream index
-        r.u16()?; // min wedge
-        r.u16()?; // max wedge
-        r.u16()?; // num stream indices
+        let min_stream_index = r.u16()?;
+        let min_wedge = r.u16()?;
+        let max_wedge = r.u16()?;
+        let num_stream_indices = r.u16()?;
         let bone = r.u16()?;
-        r.u16()?;
+        let unknown = r.u16()?;
         let first_face = r.u16()?;
         let num_faces = r.u16()?;
         let mut bone_map = Vec::new();
@@ -100,7 +110,18 @@ fn read_sections(r: &mut Reader, lineage_map: bool) -> Result<Vec<Section>, Erro
                 bone_map.push(r.i32()?);
             }
         }
-        out.push(Section { material, bone, first_face, num_faces, bone_map });
+        out.push(Section {
+            material,
+            min_stream_index,
+            min_wedge,
+            max_wedge,
+            num_stream_indices,
+            bone,
+            unknown,
+            first_face,
+            num_faces,
+            bone_map,
+        });
     }
     Ok(out)
 }
@@ -111,6 +132,91 @@ fn read_u16_array(r: &mut Reader) -> Result<Vec<u16>, Error> {
 }
 
 pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, Error> {
+    let Parsed { mut mesh, lod0, source } = parse(pkg, export)?;
+    // Some source data is broken (NaN points in FKamael_m000_l_ad00); LOD 0
+    // has the same geometry then.
+    let source_ok = source.points.iter().flatten().all(|c| c.is_finite());
+    if !source.wedges.is_empty() && !source.tris.is_empty() && (source_ok || lod0.is_none()) {
+        build_from_source(&mut mesh, &source.points, &source.wedges, &source.tris, &source.influences);
+    } else if let Some(lod) = lod0 {
+        build_from_lod(&mut mesh, &lod)?;
+    } else {
+        return Err(Error::Format(format!("{}: no geometry", mesh.name)));
+    }
+    Ok(mesh)
+}
+
+/// Raw LOD 0 of a skeletal mesh, for inspecting meshes whose soft-skinned
+/// part lives only in `SkinningData` (see `l2tool skin`).
+#[derive(Debug, Clone)]
+pub struct LodDump {
+    pub name: String,
+    pub bones: Vec<String>,
+    pub version: i32,
+    pub num_lods: usize,
+    pub num_soft_wedges: i32,
+    pub skinning: Vec<u32>,
+    /// `FSkinPoint`: position and packed normal.
+    pub skin_points: Vec<([f32; 3], u32)>,
+    pub soft: Vec<Section>,
+    pub rigid: Vec<Section>,
+    pub soft_indices: Vec<u16>,
+    pub rigid_indices: Vec<u16>,
+    pub rigid_verts: usize,
+    pub lineage_wedges: usize,
+    /// Full-resolution source arrays (points, wedges, faces, influences).
+    pub source_counts: [usize; 4],
+}
+
+impl LodDump {
+    /// Soft sections exist but neither Lineage wedges nor source data hold
+    /// their vertices: the geometry is only in `SkinningData`.
+    pub fn soft_only_in_skinning(&self) -> bool {
+        !self.soft.is_empty()
+            && self.lineage_wedges == 0
+            && (self.source_counts[1] == 0 || self.source_counts[2] == 0)
+    }
+}
+
+pub fn read_lod_dump(pkg: &Package, export: usize) -> Result<LodDump, Error> {
+    let Parsed { mesh, lod0, source } = parse(pkg, export)?;
+    let lod = lod0.ok_or_else(|| Error::Format(format!("{}: no LOD models", mesh.name)))?;
+    Ok(LodDump {
+        name: mesh.name,
+        bones: mesh.bones.into_iter().map(|b| b.name).collect(),
+        version: source.version,
+        num_lods: source.num_lods,
+        num_soft_wedges: lod.num_soft_wedges,
+        skinning: lod.skinning,
+        skin_points: lod.skin_points,
+        soft: lod.soft,
+        rigid: lod.rigid,
+        soft_indices: lod.soft_indices,
+        rigid_indices: lod.rigid_indices,
+        rigid_verts: lod.rigid_verts.len(),
+        lineage_wedges: lod.lineage_wedges.len(),
+        source_counts: [source.points.len(), source.wedges.len(), source.tris.len(), source.influences.len()],
+    })
+}
+
+/// Full-resolution source data that follows the LOD models.
+#[derive(Default)]
+struct Source {
+    version: i32,
+    num_lods: usize,
+    points: Vec<[f32; 3]>,
+    wedges: Vec<(u16, [f32; 2])>,
+    tris: Vec<([u16; 3], u8)>,
+    influences: Vec<(f32, u16, u16)>,
+}
+
+struct Parsed {
+    mesh: SkeletalMesh,
+    lod0: Option<Lod0>,
+    source: Source,
+}
+
+fn parse(pkg: &Package, export: usize) -> Result<Parsed, Error> {
     let data = pkg.export_data(export);
     let mut r = Reader::new(data);
     Properties::read(pkg, &mut r)?;
@@ -195,7 +301,7 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
     }
     skip_array(&mut r, 48)?; // AttachCoords
 
-    let mut mesh = SkeletalMesh {
+    let mesh = SkeletalMesh {
         name: pkg.full_name(ObjectRef::Export(export)),
         bones,
         materials,
@@ -214,9 +320,22 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
     let n_lods = count(&mut r, 1)?;
     let mut lod0: Option<Lod0> = None;
     for lod in 0..n_lods {
-        skip_array(&mut r, 4)?; // SkinningData
-        skip_array(&mut r, 16)?; // SkinPoints
-        r.i32()?; // NumSoftWedges
+        // SkinningData and SkinPoints are kept for LOD 0 only.
+        let (skinning, skin_points) = if lod == 0 {
+            let n = count(&mut r, 4)?;
+            let skinning: Vec<u32> = (0..n).map(|_| r.u32()).collect::<Result<_, _>>()?;
+            let n = count(&mut r, 16)?;
+            let mut points = Vec::with_capacity(n);
+            for _ in 0..n {
+                points.push((vec3(&mut r)?, r.u32()?));
+            }
+            (skinning, points)
+        } else {
+            skip_array(&mut r, 4)?;
+            skip_array(&mut r, 16)?;
+            (Vec::new(), Vec::new())
+        };
+        let num_soft_wedges = r.i32()?;
         let soft = read_sections(&mut r, lineage)?;
         let rigid = read_sections(&mut r, lineage)?;
         let soft_indices = read_u16_array(&mut r)?;
@@ -253,7 +372,17 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
             }
         }
         if lod == 0 {
-            lod0 = Some(Lod0 { soft, rigid, soft_indices, rigid_indices, rigid_verts, lineage_wedges });
+            lod0 = Some(Lod0 {
+                soft,
+                rigid,
+                soft_indices,
+                rigid_indices,
+                rigid_verts,
+                lineage_wedges,
+                skinning,
+                skin_points,
+                num_soft_wedges,
+            });
         }
     }
 
@@ -292,14 +421,8 @@ pub fn read_skeletal_mesh(pkg: &Package, export: usize) -> Result<SkeletalMesh, 
         influences.push((w, p, b));
     }
 
-    if !wedges.is_empty() && !tris.is_empty() {
-        build_from_source(&mut mesh, &points, &wedges, &tris, &influences);
-    } else if let Some(lod) = lod0 {
-        build_from_lod(&mut mesh, &lod)?;
-    } else {
-        return Err(Error::Format(format!("{}: no geometry", mesh.name)));
-    }
-    Ok(mesh)
+    let source = Source { version, num_lods: n_lods, points, wedges, tris, influences };
+    Ok(Parsed { mesh, lod0, source })
 }
 
 struct LineageWedge {
@@ -317,6 +440,9 @@ struct Lod0 {
     rigid_indices: Vec<u16>,
     rigid_verts: Vec<([f32; 3], [f32; 3], [f32; 2])>,
     lineage_wedges: Vec<LineageWedge>,
+    skinning: Vec<u32>,
+    skin_points: Vec<([f32; 3], u32)>,
+    num_soft_wedges: i32,
 }
 
 /// Keeps the four heaviest influences and normalizes them.
@@ -381,6 +507,9 @@ fn build_from_source(
 }
 
 fn build_from_lod(mesh: &mut SkeletalMesh, lod: &Lod0) -> Result<(), Error> {
+    if lod.lineage_wedges.is_empty() && !lod.soft.is_empty() && !lod.skinning.is_empty() {
+        add_skinning_wedges(mesh, lod)?;
+    }
     // Soft (skinned) wedges come first, rigid stream vertices after them.
     let soft_count = lod.lineage_wedges.len();
     // Each soft wedge needs its section's bone map; find it through the faces.
@@ -421,6 +550,11 @@ fn build_from_lod(mesh: &mut SkeletalMesh, lod: &Lod0) -> Result<(), Error> {
         let idx = lod.soft_indices.get(start..end).ok_or_else(|| Error::Format("soft section out of range".into()))?;
         mesh.indices.extend(idx.iter().map(|&x| x as u32));
         mesh.sections.push(SkinSection { material: s.material as usize, first_index: first, num_indices: idx.len() as u32 });
+    }
+    // Wedges decoded from SkinningData carry no normals; derive them from the
+    // soft triangles (the only ones so far).
+    if mesh.normals.len() < mesh.positions.len() {
+        mesh.normals = compute_normals(&mesh.positions, &mesh.indices);
     }
 
     if std::env::var_os("L2_SKEL_DEBUG").is_some() {
@@ -464,6 +598,106 @@ fn build_from_lod(mesh: &mut SkeletalMesh, lod: &Lod0) -> Result<(), Error> {
     Ok(())
 }
 
+/// One soft wedge decoded from `SkinningData`.
+#[derive(Debug, Clone, PartialEq)]
+struct SkinWedge {
+    /// Index into `SkinPoints`.
+    point: usize,
+    uv: [f32; 2],
+    /// (mesh bone index, weight), 1 to 4 entries.
+    influences: Vec<(u16, f32)>,
+}
+
+/// Decodes `FStaticLODModel::SkinningData`, the software-skinning stream:
+/// one record per soft wedge, in wedge order (the order `SoftIndices` uses),
+/// ended by `0xFFFFFFFF`. Worked out from the client's own meshes that carry
+/// both this stream and Lineage wedges.
+///
+/// - A new point: 1..=4 influence words, then U and V as `f32`. Each word
+///   holds the bone index * 6 in bits 0-11 and the weight * 65535 in bits
+///   12-27; the first word's bits 28-29 count the words after it, and its
+///   bit 31 puts the point into a cache of shared points. Points are numbered
+///   in the order they appear here, which is their order in `SkinPoints`.
+/// - A shared point (top nibble `0xF`): its cache slot * 6 in the low bits,
+///   then U and V. These are the wedges along UV seams.
+///
+/// The `* 6` are offsets into the engine's per-bone and per-vertex float
+/// buffers (a transformed position and normal per cached point).
+fn decode_skinning(data: &[u32], num_points: usize, num_bones: usize) -> Result<Vec<SkinWedge>, Error> {
+    let bad = |what: &str, at: usize| Error::Format(format!("SkinningData: {what} at word {at}"));
+    let mut out = Vec::new();
+    let mut cache: Vec<usize> = Vec::new();
+    let mut next_point = 0usize;
+    let mut i = 0;
+    while let Some(&first) = data.get(i) {
+        if first == 0xffff_ffff {
+            break;
+        }
+        let at = i;
+        let (point, influences) = if first >> 28 == 0xf {
+            let slot = (first & 0x0fff_ffff) as usize;
+            if slot % 6 != 0 {
+                return Err(bad("unaligned shared point", at));
+            }
+            let point = *cache.get(slot / 6).ok_or_else(|| bad("unknown shared point", at))?;
+            i += 1;
+            (point, Vec::new())
+        } else {
+            let n = 1 + ((first >> 28) & 3) as usize;
+            let words = data.get(i..i + n).ok_or_else(|| bad("truncated influences", at))?;
+            let mut influences = Vec::with_capacity(n);
+            for w in words {
+                let bone = (w & 0xfff) as usize;
+                if bone % 6 != 0 || bone / 6 >= num_bones.max(1) {
+                    return Err(bad("bad bone", at));
+                }
+                influences.push(((bone / 6) as u16, ((w >> 12) & 0xffff) as f32 / 65535.0));
+            }
+            if first >> 31 == 1 {
+                cache.push(next_point);
+            }
+            i += n;
+            next_point += 1;
+            (next_point - 1, influences)
+        };
+        if point >= num_points {
+            return Err(bad("point out of range", at));
+        }
+        let uv = data.get(i..i + 2).ok_or_else(|| bad("truncated UV", at))?;
+        out.push(SkinWedge { point, uv: [f32::from_bits(uv[0]), f32::from_bits(uv[1])], influences });
+        i += 2;
+    }
+    Ok(out)
+}
+
+/// Soft wedges from `SkinningData` for meshes without Lineage wedges.
+fn add_skinning_wedges(mesh: &mut SkeletalMesh, lod: &Lod0) -> Result<(), Error> {
+    let wedges = decode_skinning(&lod.skinning, lod.skin_points.len(), mesh.bones.len())
+        .map_err(|e| Error::Format(format!("{}: {e}", mesh.name)))?;
+    if wedges.len() != lod.num_soft_wedges.max(0) as usize {
+        return Err(Error::Format(format!(
+            "{}: SkinningData has {} wedges, NumSoftWedges is {}",
+            mesh.name,
+            wedges.len(),
+            lod.num_soft_wedges
+        )));
+    }
+    // Shared points copy the influences of the point they share.
+    let mut by_point: Vec<Option<([u16; 4], [f32; 4])>> = vec![None; lod.skin_points.len()];
+    for w in wedges.iter().filter(|w| !w.influences.is_empty()) {
+        let mut list: Vec<(f32, u16)> = w.influences.iter().map(|&(b, wt)| (wt, b)).collect();
+        by_point[w.point] = Some(pack_weights(&mut list));
+    }
+    for w in &wedges {
+        mesh.positions.push(lod.skin_points[w.point].0);
+        mesh.uvs.push(w.uv);
+        let (j, wt) = by_point[w.point].unwrap_or(([0; 4], [1.0, 0.0, 0.0, 0.0]));
+        mesh.joints.push(j);
+        mesh.weights.push(wt);
+    }
+    Ok(())
+}
+
 fn compute_normals(pos: &[[f32; 3]], idx: &[u32]) -> Vec<[f32; 3]> {
     // Accumulate per position (not per wedge) so UV seams stay smooth.
     use std::collections::HashMap;
@@ -489,4 +723,62 @@ fn compute_normals(pos: &[[f32; 3]], idx: &[u32]) -> Vec<[f32; 3]> {
             [n[0] / l, n[1] / l, n[2] / l]
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uv(u: f32, v: f32) -> [u32; 2] {
+        [u.to_bits(), v.to_bits()]
+    }
+
+    /// Influence word: bone, weight 0..=65535, number of words after it, cache flag.
+    fn infl(bone: u32, weight: u32, more: u32, cache: bool) -> u32 {
+        (cache as u32) << 31 | more << 28 | weight << 12 | bone * 6
+    }
+
+    #[test]
+    fn decodes_points_influences_and_shared_points() {
+        let mut data = vec![infl(2, 0xffff, 0, false)];
+        data.extend(uv(0.0, 0.5));
+        // Three influences, cached for later.
+        data.extend([infl(1, 0xcf5a, 2, true), infl(9, 0x199a, 0, false), infl(6, 0x170b, 0, false)]);
+        data.extend(uv(0.25, 0.75));
+        data.extend([infl(3, 0x7fff, 1, true), infl(4, 0x8000, 0, false)]);
+        data.extend(uv(1.0, 1.0));
+        // Shared: cache slot 1 (point 2), then slot 0 (point 1).
+        data.push(0xf000_0000 | 6);
+        data.extend(uv(0.5, 0.5));
+        data.push(0xf000_0000);
+        data.extend(uv(0.125, 0.0));
+        data.push(0xffff_ffff);
+        let w = decode_skinning(&data, 3, 10).unwrap();
+        assert_eq!(w.len(), 5);
+        assert_eq!(w.iter().map(|w| w.point).collect::<Vec<_>>(), vec![0, 1, 2, 2, 1]);
+        assert_eq!(w[0].influences, vec![(2, 1.0)]);
+        assert_eq!(w[1].influences.iter().map(|x| x.0).collect::<Vec<_>>(), vec![1, 9, 6]);
+        let sum: f32 = w[1].influences.iter().map(|x| x.1).sum();
+        assert!((sum - 1.0).abs() < 1e-3);
+        assert_eq!(w[3].uv, [0.5, 0.5]);
+        assert!(w[3].influences.is_empty());
+    }
+
+    #[test]
+    fn rejects_broken_streams() {
+        // Shared point before anything was cached.
+        assert!(decode_skinning(&[0xf000_0000, 0, 0, 0xffff_ffff], 1, 1).is_err());
+        // Bone outside the skeleton.
+        assert!(decode_skinning(&[infl(5, 0xffff, 0, false), 0, 0], 1, 2).is_err());
+        // More points than SkinPoints.
+        assert!(decode_skinning(&[infl(0, 0xffff, 0, false), 0, 0, infl(0, 0xffff, 0, false), 0, 0], 1, 1).is_err());
+        // Cut off in the middle of a record.
+        assert!(decode_skinning(&[infl(0, 0xffff, 1, false)], 1, 1).is_err());
+    }
+
+    #[test]
+    fn empty_stream_and_missing_terminator() {
+        assert!(decode_skinning(&[0xffff_ffff], 0, 0).unwrap().is_empty());
+        assert_eq!(decode_skinning(&[infl(0, 0xffff, 0, false), 0, 0], 1, 1).unwrap().len(), 1);
+    }
 }
