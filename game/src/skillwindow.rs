@@ -1,7 +1,8 @@
 //! The skill window (K / gamepad right stick press), as in Classic: learned
 //! skills, and the class tree's next skill levels to learn for SP (and the
 //! spellbooks or Adena some entries ask for). Clicking a learned active skill
-//! puts it on the hotbar or takes it off.
+//! puts it on the hotbar or takes it off; dragging it onto a hotbar slot puts
+//! it there.
 
 use bevy::prelude::*;
 
@@ -10,7 +11,7 @@ use crate::input::PlayerInput;
 use crate::items::{Inventory, ItemData};
 use crate::mmo::{Hero, Phase};
 use crate::rpg::{HeroStats, Log};
-use crate::skillplay::{HeroSkills, HOTBAR};
+use crate::skillplay::HeroSkills;
 
 #[derive(Resource, Default)]
 struct SkillUi {
@@ -89,8 +90,8 @@ pub fn learn(entry: &TreeEntry, stats: &mut HeroStats, inv: &mut Inventory, skil
     }
     let first = !skills.learned.contains_key(&entry.skill);
     skills.learned.insert(entry.skill, entry.level);
-    if first && book.skills.get(&entry.skill).is_some_and(|s| s.is_active()) && skills.hotbar.len() < HOTBAR {
-        skills.hotbar.push(entry.skill);
+    if first && book.skills.get(&entry.skill).is_some_and(|s| s.is_active()) {
+        skills.add_to_hotbar(entry.skill);
     }
     Ok(format!("You have learned {name} Lv {}.", entry.level))
 }
@@ -99,7 +100,7 @@ pub fn learn(entry: &TreeEntry, stats: &mut HeroStats, inv: &mut Inventory, skil
 fn skill_window(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     input: Res<PlayerInput>,
     book: Res<SkillBook>,
     dp: Res<Datapack>,
@@ -149,12 +150,10 @@ fn skill_window(
                 Ok(m) | Err(m) => log.push(m),
             },
             Some(Row::Known(id, _)) => {
-                if let Some(slot) = skills.hotbar.iter().position(|s| s == id) {
-                    skills.hotbar.remove(slot);
+                if skills.on_hotbar(*id) {
+                    skills.remove_from_hotbar(*id);
                 } else if book.skills.get(id).is_some_and(|s| s.is_active()) {
-                    if skills.hotbar.len() < HOTBAR {
-                        skills.hotbar.push(*id);
-                    } else {
+                    if !skills.add_to_hotbar(*id) {
                         log.push("The hotbar is full.");
                     }
                 } else {
@@ -166,7 +165,8 @@ fn skill_window(
         ui.shown = None;
     }
     // Redraw when anything shown changes.
-    let state = (ui.selected as u64) ^ (stats.sp << 8) ^ ((skills.learned.len() as u64) << 40) ^ ((skills.hotbar.len() as u64) << 50) ^ ((stats.level as u64) << 56);
+    let on_bar = skills.hotbar.iter().fold(0u64, |h, id| h.wrapping_mul(31).wrapping_add(*id as u64));
+    let state = (ui.selected as u64) ^ (stats.sp << 8) ^ ((skills.learned.len() as u64) << 40) ^ on_bar.rotate_left(50) ^ ((stats.level as u64) << 56);
     if ui.shown == Some(state) {
         return;
     }
@@ -193,6 +193,7 @@ fn skill_window(
                 })
                 .clone()
         };
+        let is_active = |id: u32| book.skills.get(&id).is_some_and(|s| s.is_active());
         let mut sections: [(&str, Vec<(usize, u32, String, bool)>); 4] = Default::default();
         sections[0].0 = "Активные умения";
         sections[1].0 = "Пассивные умения";
@@ -202,7 +203,7 @@ fn skill_window(
             let (sec, id, info, dim) = match row {
                 Row::Known(id, lv) => {
                     let active = book.skills.get(id).is_some_and(|s| s.is_active());
-                    let bar = if skills.hotbar.contains(id) { ", на панели" } else { "" };
+                    let bar = if skills.on_hotbar(*id) { ", на панели" } else { "" };
                     (if active { 0 } else { 1 }, *id, format!("{} ур. {lv}{bar}", name(*id)), false)
                 }
                 Row::Learn(e) => {
@@ -248,7 +249,16 @@ fn skill_window(
                                 }
                                 cell.insert(node);
                             }
-                            cell.observe(move |_: On<bevy::picking::events::PointerClick>, mut ui: ResMut<SkillUi>| ui.clicked = Some(i));
+                            // Learned active skills drag onto the hotbar.
+                            let draggable = matches!(list.get(i), Some(Row::Known(..))) && is_active(*id);
+                            if draggable {
+                                crate::hotbar::make_draggable(&mut cell, *id, None);
+                            }
+                            cell.observe(move |_: On<bevy::picking::events::PointerClick>, mut ui: ResMut<SkillUi>, drag: Res<crate::hotbar::SkillDrag>| {
+                                if !drag.active {
+                                    ui.clicked = Some(i);
+                                }
+                            });
                             cell.observe(move |_: On<bevy::picking::events::PointerOver>, mut t: Single<&mut Text, With<SkillInfo>>| t.0 = info.clone());
                         }
                     });
@@ -297,7 +307,7 @@ fn skill_window(
                     }
                     Row::Later(e) => (format!("{} Lv {} (level {})", name(e.skill), e.level, e.get_level), Color::srgb(0.55, 0.55, 0.55)),
                     Row::Known(id, lv) => {
-                        let bar = if skills.hotbar.contains(id) { "  [hotbar]" } else { "" };
+                        let bar = if skills.on_hotbar(*id) { "  [hotbar]" } else { "" };
                         (format!("{} Lv {lv}{bar}", name(*id)), Color::WHITE)
                     }
                 };

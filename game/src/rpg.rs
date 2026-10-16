@@ -21,6 +21,10 @@ use crate::mmo::{Hero, Phase};
 use crate::skinned::{spawn_model, Animated, Model, ModelCache};
 use crate::streaming::{ue_to_bevy, TileStreamer};
 
+/// Collision radius of a player character (Unreal units; the datapack has
+/// 6.5 to 9 depending on race and sex).
+pub const HERO_RADIUS: f32 = 8.0;
+
 /// Model kinds loaded per frame (each load decodes a skeletal mesh).
 const MODEL_LOADS_PER_FRAME: usize = 2;
 
@@ -231,6 +235,8 @@ impl HeroStats {
                 "CriticalRate" => apply(&mut self.crit),
                 "MaxHp" => apply(&mut self.max_hp),
                 "MaxMp" => apply(&mut self.max_mp),
+                "HpRegen" => apply(&mut self.hp_regen),
+                "MpRegen" => apply(&mut self.mp_regen),
                 _ => {}
             }
         }
@@ -238,7 +244,9 @@ impl HeroStats {
         self.matk_speed = cast_speed;
         // 500 000 / attack speed milliseconds between hits.
         self.atk_interval = 500.0 / atk_speed.max(1.0);
-        self.atk_range = (w("pAtkRange").unwrap_or(t.atk_range).max(40.0) + 30.0) * UU_TO_M;
+        // Lineage: a hit lands when the centres are within the weapon range
+        // plus both collision radii; the target's radius is added at use.
+        self.atk_range = (w("pAtkRange").unwrap_or(t.atk_range).max(20.0) + HERO_RADIUS) * UU_TO_M;
         self.hp = self.hp.min(self.max_hp);
         self.mp = self.mp.min(self.max_mp);
     }
@@ -505,16 +513,17 @@ impl Log {
 }
 
 /// Tab / gamepad RB: next monster in front of the camera; left click picks
-/// the NPC under the cursor; F / gamepad X attacks.
+/// the NPC under the cursor, or the hero himself (as does a click on the
+/// status window or gamepad Select); F / gamepad X attacks.
 #[allow(clippy::too_many_arguments)]
 pub fn pick_target(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut target: ResMut<Target>,
-    hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
+    hero: Single<(Entity, &Transform, &mut HeroStats), With<Hero>>,
     npcs: Query<(Entity, &Npc, &Transform), Without<Hero>>,
     mut talk: ResMut<crate::dialog::TalkRequest>,
     mut move_to: ResMut<crate::mmo::MoveTarget>,
@@ -523,7 +532,11 @@ pub fn pick_target(
     streamer: Res<crate::streaming::TileStreamer>,
     world: Res<crate::collision::CollisionWorld>,
 ) {
-    let (hero_tr, mut stats) = hero.into_inner();
+    let (hero_e, hero_tr, mut stats) = hero.into_inner();
+    if gamepads.iter().any(|g| g.just_pressed(GamepadButton::Select)) {
+        target.0 = Some(hero_e);
+        stats.attacking = false;
+    }
     // L2_AUTOFIGHT: keep targeting and attacking the nearest monster (tests).
     let auto = std::env::var_os("L2_AUTOFIGHT").is_some() && stats.hp > 0.0;
     let target_dead = target.0.is_none_or(|e| npcs.get(e).map_or(true, |(_, n, _)| n.state == NpcState::Dead));
@@ -570,7 +583,19 @@ pub fn pick_target(
                     }
                 }
             }
-            if let Some((e, _)) = best {
+            // The hero's own model: a click on it targets himself.
+            {
+                let center = hero_tr.translation + Vec3::Y * 0.9;
+                let to = center - ray.origin;
+                let along = to.dot(*ray.direction);
+                if along > 0.0 && (to - *ray.direction * along).length() < 0.45 && best.is_none_or(|(_, d)| along < d) {
+                    best = Some((hero_e, along));
+                }
+            }
+            if best.is_some_and(|(e, _)| e == hero_e) {
+                target.0 = Some(hero_e);
+                stats.attacking = false;
+            } else if let Some((e, _)) = best {
                 if target.0 == Some(e) {
                     // Second click attacks a monster or talks to an NPC.
                     match npcs.get(e) {
@@ -615,11 +640,11 @@ fn hero_attack(
     mut target: ResMut<Target>,
     mut log: ResMut<Log>,
     items: Res<crate::items::ItemData>,
-    hero: Single<(&Hero, &mut Transform, &mut HeroStats, Option<&mut crate::items::Inventory>)>,
+    hero: Single<(Entity, &Hero, &mut Transform, &mut HeroStats, Option<&mut crate::items::Inventory>)>,
     mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
 ) {
-    let (hero, mut tr, mut stats, inv) = hero.into_inner();
+    let (hero_e, hero, mut tr, mut stats, inv) = hero.into_inner();
     let dt = time.delta_secs();
     stats.atk_timer -= dt;
     if stats.hp <= 0.0 || !stats.attacking || input.move_dir.length() > 0.1 {
@@ -632,6 +657,11 @@ fn hero_attack(
         stats.attacking = false;
         return;
     };
+    // The hero does not hit himself; he stays selected.
+    if te == hero_e {
+        stats.attacking = false;
+        return;
+    }
     let Ok((mut npc, ntr)) = npcs.get_mut(te) else {
         target.0 = None;
         stats.attacking = false;
@@ -703,12 +733,15 @@ pub fn award_kill(npc: &mut Npc, stats: &mut HeroStats, dp: &Datapack, log: &mut
 }
 
 /// Monster AI: aggro, chase, attack, leash back home.
+#[allow(clippy::too_many_arguments)]
 fn npc_ai(
     time: Res<Time>,
     mut log: ResMut<Log>,
     hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
     mut npcs: Query<(Entity, &mut Npc, &mut Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
 ) {
     let dt = time.delta_secs();
     let (hero_tr, mut stats) = hero.into_inner();
@@ -765,10 +798,10 @@ fn npc_ai(
             NpcState::Chase => {
                 let to = (hero_pos - tr.translation).with_y(0.0);
                 tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
-                let reach = (npc.template.atk_range + npc.template.radius) * UU_TO_M + 0.5;
+                let reach = (npc.template.atk_range + npc.template.radius + HERO_RADIUS) * UU_TO_M;
                 if to.length() > reach {
                     tr.translation += to.normalize() * npc.template.run_speed * UU_TO_M * dt;
-                    tr.translation.y = hero_pos.y.max(tr.translation.y - 2.0 * dt);
+                    tr.translation.y = crate::mmo::settle(tr.translation, &streamer, &world);
                     if let Some(a) = anim.as_mut() {
                         a.play(&["Run", "Walk"], true);
                     }
@@ -798,6 +831,7 @@ fn npc_ai(
                 let to = (npc.home - tr.translation).with_y(0.0);
                 tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
                 tr.translation += to.normalize_or_zero() * (npc.template.walk_speed * 2.0 * UU_TO_M * dt).min(to.length());
+                tr.translation.y = crate::mmo::settle(tr.translation, &streamer, &world);
                 if let Some(a) = anim.as_mut() {
                     a.play(&["Walk", "Run"], true);
                 }
@@ -822,6 +856,7 @@ fn npc_ai(
                     } else {
                         tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
                         tr.translation += to.normalize() * (npc.template.walk_speed * UU_TO_M * dt).min(to.length());
+                        tr.translation.y = crate::mmo::settle(tr.translation, &streamer, &world);
                         if let Some(a) = anim.as_mut() {
                             a.play(&["Walk", "Run"], true);
                         }
@@ -1069,24 +1104,29 @@ fn update_hud(
     target: Res<Target>,
     log: Res<Log>,
     dp: Res<Datapack>,
-    hero: Single<&HeroStats>,
+    hero: Single<(Entity, &HeroStats)>,
     npcs: Query<&Npc>,
     mut bars: Query<(&Bar, &mut Node)>,
     mut labels: Query<(&BarLabel, &mut Text), Without<LogText>>,
     mut window: Single<&mut Visibility, With<TargetWindow>>,
     mut log_text: Single<&mut Text, With<LogText>>,
 ) {
-    let s = *hero;
+    let (hero_e, s) = *hero;
     let cur = dp.exp.get(s.level as usize).copied().unwrap_or(0);
     let next = dp.exp.get(s.level as usize + 1).copied().unwrap_or(cur + 1);
     let exp_frac = (s.exp.saturating_sub(cur)) as f32 / (next.saturating_sub(cur)).max(1) as f32;
-    let tgt = target.0.and_then(|e| npcs.get(e).ok());
+    // (name, level, HP, max HP) of the target, the hero included.
+    let tgt = match target.0 {
+        Some(e) if e == hero_e => Some((dp.class_name(s.template.class_id).to_string(), s.level, s.hp, s.max_hp)),
+        Some(e) => npcs.get(e).ok().map(|n| (n.template.name.clone(), n.template.level, n.hp, n.template.hp)),
+        None => None,
+    };
     for (bar, mut node) in &mut bars {
         let frac = match bar.0 {
             BarKind::Hp => s.hp / s.max_hp.max(1.0),
             BarKind::Mp => s.mp / s.max_mp.max(1.0),
             BarKind::Exp => exp_frac,
-            BarKind::TargetHp => tgt.map_or(0.0, |n| n.hp / n.template.hp.max(1.0)),
+            BarKind::TargetHp => tgt.as_ref().map_or(0.0, |t| t.2 / t.3.max(1.0)),
         };
         node.width = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
     }
@@ -1095,9 +1135,7 @@ fn update_hud(
             BarKind::Hp => format!("HP {:.0} / {:.0}", s.hp.max(0.0), s.max_hp),
             BarKind::Mp => format!("MP {:.0} / {:.0}", s.mp, s.max_mp),
             BarKind::Exp => format!("Lv {}  EXP {:.2}%  SP {}", s.level, exp_frac * 100.0, s.sp),
-            BarKind::TargetHp => tgt.map_or(String::new(), |n| {
-                format!("{} (Lv {})  {:.0} / {:.0}", n.template.name, n.template.level, n.hp.max(0.0), n.template.hp)
-            }),
+            BarKind::TargetHp => tgt.as_ref().map_or(String::new(), |t| format!("{} (Lv {})  {:.0} / {:.0}", t.0, t.1, t.2.max(0.0), t.3)),
         };
     }
     **window = if tgt.is_some() { Visibility::Inherited } else { Visibility::Hidden };

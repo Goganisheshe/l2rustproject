@@ -193,7 +193,7 @@ fn login_camera(mut cam: Single<&mut Transform, With<Camera3d>>) {
 
 fn login(
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     mut clicks: ResMut<UiClicks>,
     mut next: ResMut<NextState<Phase>>,
     mut exit: MessageWriter<AppExit>,
@@ -228,7 +228,7 @@ fn enter_select(mut st: ResMut<LobbyState>, mut cam: Single<&mut Transform, With
 fn select(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     input: Res<crate::input::PlayerInput>,
     dp: Res<Datapack>,
     mut st: ResMut<LobbyState>,

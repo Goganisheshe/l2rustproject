@@ -100,7 +100,8 @@ teleports and the quest pages. What is playable:
   Without `interface.xdat` the game falls back to plain panels.
 
 Test helpers: `L2_INVENTORY=1`, `L2_AUTOFIGHT=1`, `L2_AUTOCAST=1`,
-`L2_DEBUG_NPC=1`, `L2_START="x,y,z"`, `L2_LEVEL=<n>`, `L2_CLASS_PICK=<i>`,
+`L2_DEBUG_NPC=1`, `L2_START="x,y,z"`, `L2_LEVEL=<n>` (new characters), `L2_ALL_SKILLS=1`
+(every skill of the class tree up to the current level, free), `L2_CLASS_PICK=<i>`,
 `L2_TALK=<npc id>` with `L2_BYPASS="cmd|cmd"`, `L2_CONTINUE=1`,
 `L2_NO_TUTORIAL=1`, `L2_AUTOSAVE_SECS=<s>`, `L2_MOVE_TO=dx,dz`, `L2_AUTOSHOTS=1`,
 `L2_SIT=1`, `L2_GROUNDLOOT=1` (with `L2_AUTOFIGHT`), `L2_STATUS=1`, `L2_MAP=1`,

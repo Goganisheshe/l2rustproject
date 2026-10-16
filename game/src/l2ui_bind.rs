@@ -1,24 +1,22 @@
 //! Drives the original client windows built by `l2ui.rs`: the status window
-//! (HP / MP / CP, level, name), the target window, the horizontal shortcut
-//! bar with skill icons and the chat window with the system log.
-
-use std::collections::HashMap;
+//! (HP / MP / CP, level, name; a click on it targets the hero), the target
+//! window, the horizontal shortcut bars (filled by `hotbar.rs`) and the chat
+//! window with the system log.
 
 use bevy::prelude::*;
 
-use crate::datapack::{Datapack, SkillBook};
+use crate::datapack::Datapack;
 use crate::l2assets::L2Library;
 use crate::l2ui::{spawn_window, BarFill, CtrlText, Interface, UiCtrl, UiTextures, UiWindow};
 use crate::mmo::{Hero, Phase};
 use crate::rpg::{HeroStats, Log, Npc, Target};
-use crate::skillplay::HeroSkills;
 
 pub struct L2UiBindPlugin;
 
 impl Plugin for L2UiBindPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Phase::InWorld), build_hud)
-            .add_systems(Update, (status_window, target_window, shortcut_icons, chat_window).run_if(in_state(Phase::InWorld)));
+            .add_systems(Update, (status_window, target_window, chat_window).run_if(in_state(Phase::InWorld)));
     }
 }
 
@@ -50,19 +48,36 @@ fn build_hud(
     let screen = windows.iter().next().map_or(Vec2::new(1920.0, 1080.0), |w| Vec2::new(w.width(), w.height()));
     let x = &iface.0;
     for name in ["StatusWnd", "TargetStatusWnd", "ChatWnd"] {
-        let Some(_) = spawn_window(&mut commands, &iface, x, name, screen, &hidden, &mut tex, &mut lib, &mut images) else {
+        let Some(root) = spawn_window(&mut commands, &iface, x, name, screen, &hidden, &mut tex, &mut lib, &mut images) else {
             warn!("window {name} not in interface.xdat");
             continue;
         };
+        // As in the client, a click on the own status window targets the hero.
+        if name == "StatusWnd" {
+            commands.entity(root).observe(|_: On<bevy::picking::events::PointerClick>, mut target: ResMut<Target>, hero: Query<Entity, With<Hero>>| {
+                if let Ok(h) = hero.single() {
+                    target.0 = Some(h);
+                }
+            });
+        }
     }
     spawn_menu_bar(&mut commands, &mut tex, &mut lib, &mut images);
-    // The horizontal shortcut bar is a sub-window of ShortcutWnd with its own
-    // default position.
+    // The horizontal shortcut bars are sub-windows of ShortcutWnd: the main
+    // one with its own default position and four more rows the expand button
+    // shows (`hotbar.rs` places them above the main one). The reduce button
+    // shares the expand button's place; `hotbar.rs` shows one of the two.
+    let bar_hidden = |n: &str| n != "ReduceButton" && hidden(n);
     if let Some(sw) = x.window("ShortcutWnd") {
-        if let Some(h) = sw.children().iter().find(|c| c.name() == "ShortcutWndHorizontal") {
+        for bar in 0..crate::skillplay::MAX_BARS {
+            let name = if bar == 0 { "ShortcutWndHorizontal".to_string() } else { format!("ShortcutWndHorizontal_{bar}") };
+            let Some(h) = sw.children().iter().find(|c| c.name() == name) else { continue };
             let mut sub = (**x).clone();
             sub.windows = vec![h.clone()];
-            spawn_window(&mut commands, &iface, &sub, "ShortcutWndHorizontal", screen, &hidden, &mut tex, &mut lib, &mut images);
+            if let Some(root) = spawn_window(&mut commands, &iface, &sub, &name, screen, &bar_hidden, &mut tex, &mut lib, &mut images) {
+                if bar > 0 {
+                    commands.entity(root).insert(Visibility::Hidden);
+                }
+            }
         }
     }
 }
@@ -171,25 +186,37 @@ fn status_texts(dp: &Datapack, s: &HeroStats, ctrl: &str, name: &str) -> Option<
 #[allow(clippy::type_complexity)]
 fn target_window(
     target: Res<Target>,
+    dp: Res<Datapack>,
+    creation: Res<crate::mmo::Creation>,
+    hero: Single<(Entity, &HeroStats), With<Hero>>,
     npcs: Query<&Npc>,
     mut roots: Query<(&UiWindow, &mut Visibility)>,
     ctrls: Query<(&UiCtrl, Option<&Children>)>,
     mut fills: Query<(&BarFill, &mut Node)>,
     mut texts: Query<(&UiCtrl, &mut Text), With<CtrlText>>,
 ) {
-    let tgt = target.0.and_then(|e| npcs.get(e).ok());
+    let (hero_e, s) = *hero;
+    // (name, level, HP fraction) of the target, the hero included.
+    let tgt = match target.0 {
+        Some(e) if e == hero_e => {
+            let name = status_texts(&dp, s, "UserName", &creation.name).unwrap_or_default();
+            Some((name, s.level, s.hp / s.max_hp.max(1.0)))
+        }
+        Some(e) => npcs.get(e).ok().map(|n| (n.template.name.clone(), n.template.level, n.hp / n.template.hp.max(1.0))),
+        None => None,
+    };
     for (w, mut vis) in &mut roots {
         if w.0 == "TargetStatusWnd" {
             *vis = if tgt.is_some() { Visibility::Inherited } else { Visibility::Hidden };
         }
     }
-    let Some(n) = tgt else { return };
+    let Some((tname, tlevel, hp)) = tgt else { return };
     for (ctrl, children) in &ctrls {
         if ctrl.window != "TargetStatusWnd" {
             continue;
         }
         let frac = match ctrl.name.as_str() {
-            "barHP" => n.hp / n.template.hp.max(1.0),
+            "barHP" => hp,
             "barMP" => 1.0,
             _ => continue,
         };
@@ -199,63 +226,11 @@ fn target_window(
             }
         }
     }
-    let name = format!("{}  Lv {}", n.template.name, n.template.level);
+    let name = format!("{tname}  Lv {tlevel}");
     for (ctrl, mut t) in &mut texts {
         if ctrl.window == "TargetStatusWnd" && ctrl.name == "UserName" && t.0 != name {
             t.0 = name.clone();
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn shortcut_icons(
-    mut commands: Commands,
-    book: Res<SkillBook>,
-    mut lib: ResMut<L2Library>,
-    mut images: ResMut<Assets<Image>>,
-    skills: Option<Single<&HeroSkills, With<Hero>>>,
-    slots: Query<(Entity, &UiCtrl)>,
-    mut shown: Local<Vec<u32>>,
-    mut icons: Local<HashMap<String, Option<Handle<Image>>>>,
-    mut spawned: Local<Vec<Entity>>,
-) {
-    let Some(skills) = skills else { return };
-    if *shown == skills.hotbar && !spawned.is_empty() {
-        return;
-    }
-    *shown = skills.hotbar.clone();
-    for e in spawned.drain(..) {
-        commands.entity(e).despawn();
-    }
-    for (e, ctrl) in &slots {
-        if ctrl.window != "ShortcutWndHorizontal" {
-            continue;
-        }
-        let Some(i) = ctrl.name.strip_prefix("Shortcut").and_then(|n| n.parse::<usize>().ok()) else { continue };
-        let Some(skill) = skills.hotbar.get(i - 1) else { continue };
-        let icon_name = book.skills.get(skill).map(|s| s.icon.clone()).unwrap_or_default();
-        let icon = icons
-            .entry(icon_name.clone())
-            .or_insert_with(|| {
-                let (pkg, obj) = icon_name.split_once('.')?;
-                lib.texture(pkg, obj, false).map(|img| images.add(img))
-            })
-            .clone();
-        if let Some(img) = icon {
-            let id = commands
-                .spawn((ImageNode::new(img), Node { position_type: PositionType::Absolute, width: Val::Px(32.0), height: Val::Px(32.0), left: Val::Px(2.0), top: Val::Px(2.0), ..default() }, ChildOf(e)))
-                .id();
-            spawned.push(id);
-        }
-        let label = commands
-            .spawn((
-                Text::new(i.to_string()),
-                TextFont { font_size: FontSize::Px(10.0), ..default() },
-                Node { position_type: PositionType::Absolute, left: Val::Px(3.0), top: Val::Px(1.0), ..default() },
-                ChildOf(e),
-            ))
-            .id();
-        spawned.push(label);
     }
 }
 
