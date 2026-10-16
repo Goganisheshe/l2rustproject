@@ -12,8 +12,6 @@ use ue2::xdat::{Element, Xdat};
 
 use crate::l2assets::L2Library;
 
-const DEFAULT_CLIENT_DIR: &str = "G:/visery/l2-client";
-
 #[derive(Resource, Clone)]
 pub struct Interface(pub Arc<Xdat>, pub Arc<HashMap<u32, String>>);
 
@@ -177,7 +175,7 @@ impl Plugin for L2UiPlugin {
 }
 
 fn load_interface(mut commands: Commands) {
-    let root = std::env::var_os("L2_CLIENT_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| DEFAULT_CLIENT_DIR.into());
+    let root = crate::paths::client_dir();
     match std::fs::read(root.join("system/interface.xdat")).map_err(|e| e.to_string()).and_then(|d| ue2::xdat::parse(&d).map_err(|e| e.to_string())) {
         Ok(x) => {
             let sys = root.join("system");

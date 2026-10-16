@@ -13,7 +13,6 @@ use crate::l2assets::L2Library;
 use crate::mmo::{Hero, Phase};
 use crate::rpg::{HeroStats, Log};
 
-const DEFAULT_DATAPACK: &str = "G:/visery/l2-datapack/classic";
 pub const ADENA: u32 = 57;
 
 #[derive(Debug, Clone)]
@@ -154,7 +153,7 @@ fn attr<T: std::str::FromStr>(n: roxmltree::Node, name: &str) -> Option<T> {
 }
 
 fn load_items(mut data: ResMut<ItemData>) {
-    let root = std::env::var_os("L2_DATAPACK").map(PathBuf::from).unwrap_or_else(|| DEFAULT_DATAPACK.into());
+    let root = crate::paths::datapack_dir();
     let mut files = Vec::new();
     xml_files(&root.join("stats/items"), &mut files);
     for f in files {

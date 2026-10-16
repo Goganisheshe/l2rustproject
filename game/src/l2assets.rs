@@ -1,10 +1,10 @@
 //! Bridge from the original client's UE2 packages to Bevy assets.
 //!
-//! The client folder is read-only input. Set `L2_CLIENT_DIR` to point at it;
+//! The client folder is read-only input. Point `L2_CLIENT_DIR` or `l2survivor.cfg` at it
+//! (see `paths.rs`);
 //! when it is missing the game still runs with flat-colored placeholders.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
@@ -13,7 +13,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use ue2::library::Library;
 
-const DEFAULT_CLIENT_DIR: &str = "G:/visery/l2-client";
 const DEFAULT_GROUND: &str = "ertheia_v_t:ertheia_a_ground00";
 
 /// Unreal units to Bevy meters: a Lineage human is ~48 units tall, so this
@@ -51,13 +50,11 @@ pub struct L2AssetsPlugin;
 
 impl Plugin for L2AssetsPlugin {
     fn build(&self, app: &mut App) {
-        let root = std::env::var_os("L2_CLIENT_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_CLIENT_DIR));
+        let root = crate::paths::client_dir();
         let lib = match Library::new(&root) {
             Ok(l) => Some(l),
             Err(e) => {
-                warn!("Lineage II client not found at {}: {e}", root.display());
+                error!("{} ({e})", crate::paths::missing_hint("Lineage II client", "client", "L2_CLIENT_DIR", &root, crate::paths::configured().0));
                 None
             }
         };

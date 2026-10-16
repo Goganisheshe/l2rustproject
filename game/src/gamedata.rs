@@ -12,7 +12,6 @@
 //! Monsters come from `npcgrp.dat`: mesh, per-slot textures and collision size.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -21,8 +20,6 @@ use ue2::props::{class_defaults, Properties};
 use ue2::{ObjectRef, Package, Reader};
 
 use crate::l2assets::{L2Library, UU_TO_M};
-
-const DEFAULT_CLIENT_DIR: &str = "G:/visery/l2-client";
 
 /// One visual effect of a skill stage.
 #[derive(Debug, Clone)]
@@ -84,7 +81,7 @@ impl Plugin for GameDataPlugin {
 }
 
 fn load_game_data(mut data: ResMut<GameData>, mut lib: ResMut<L2Library>) {
-    let root = std::env::var_os("L2_CLIENT_DIR").map(PathBuf::from).unwrap_or_else(|| DEFAULT_CLIENT_DIR.into());
+    let root = crate::paths::client_dir();
     match load(&root, &mut lib) {
         Ok(d) => {
             info!("game data: {} skill visuals, {} npc models", d.visuals.len(), d.npc_models.len());
