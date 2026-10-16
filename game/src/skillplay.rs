@@ -14,7 +14,7 @@ use bevy::prelude::*;
 
 
 use crate::datapack::{Datapack, ServerSkill, SkillBook};
-use crate::effects::{spawn_effect_with, EffectCache, EffectSpawn};
+use crate::effects::{spawn_effect_with, EffectCache, EffectSpawn, StopEffect};
 use crate::gamedata::{GameData, SkillDef};
 use crate::l2assets::{L2Library, UU_TO_M};
 use crate::mmo::{Hero, Phase};
@@ -199,6 +199,8 @@ struct Cast {
     plan: Vec<Step>,
     /// When the skill goes off.
     release_at: f32,
+    /// Casting effects, stopped when the skill goes off or the cast breaks.
+    fx: Vec<Entity>,
 }
 
 /// One clip of a cast animation: candidate clip names, start time, speed.
@@ -424,7 +426,7 @@ fn cast_input(
     let magic = data.visuals.get(&id).is_some_and(|v| v.magic);
     let speed = if magic { stats.matk_speed / 333.0 } else { stats.patk_speed / 300.0 };
     let total = (def.hit_time / speed.max(0.1)).clamp(0.3, 4.0);
-    skills.cast = Some(Cast { skill: id, level, target: tgt, time: 0.0, total, stage: usize::MAX, fired: false, mp, plan: Vec::new(), release_at: 0.0 });
+    skills.cast = Some(Cast { skill: id, level, target: tgt, time: 0.0, total, stage: usize::MAX, fired: false, mp, plan: Vec::new(), release_at: 0.0, fx: Vec::new() });
 }
 
 /// Runs the hero toward the target of a skill cast out of range; moving,
@@ -504,6 +506,9 @@ fn run_cast(
         if let Ok(mut a) = anims.get_mut(hero.actor) {
             a.speed = 1.0;
         }
+        for e in cast.fx {
+            commands.entity(e).try_insert(StopEffect);
+        }
         log.push("Casting has been interrupted.");
         return;
     }
@@ -529,7 +534,7 @@ fn run_cast(
         let bone_of = |a: Entity, n: &[&str]| anims.get(a).ok().and_then(|x| x.bone(n));
         for spec in visual.iter().flat_map(|v| v.casting.iter()) {
             let s = place(spec, &caster, Some(&target), &bone_of);
-            spawn_fx(&mut commands, &mut cache, &mut lib, &mut assets, &spec.class, s, Some(target.entity));
+            cast.fx.extend(spawn_fx(&mut commands, &mut cache, &mut lib, &mut assets, &spec.class, s, Some(target.entity)));
         }
     }
     let stage = cast.plan.iter().rposition(|s| cast.time >= s.start).unwrap_or(0);
@@ -545,6 +550,10 @@ fn run_cast(
     cast.time += dt;
     if !cast.fired && cast.time >= cast.release_at {
         cast.fired = true;
+        // The casting glow ends as the skill goes off.
+        for e in std::mem::take(&mut cast.fx) {
+            commands.entity(e).try_insert(StopEffect);
+        }
         let flying_time = visual.as_ref().map_or(0.0, |v| v.flying_time);
         let mut flies = false;
         {
@@ -584,12 +593,11 @@ fn run_cast(
 type FxAssets<'a> = (ResMut<'a, Assets<Mesh>>, ResMut<'a, Assets<StandardMaterial>>, ResMut<'a, Assets<Image>>);
 
 /// Loads effect `class` and spawns it as `s` says; actor beams end on `beam_target`.
-fn spawn_fx(commands: &mut Commands, cache: &mut EffectCache, lib: &mut L2Library, assets: &mut FxAssets, class: &str, mut s: EffectSpawn, beam_target: Option<Entity>) {
+fn spawn_fx(commands: &mut Commands, cache: &mut EffectCache, lib: &mut L2Library, assets: &mut FxAssets, class: &str, mut s: EffectSpawn, beam_target: Option<Entity>) -> Option<Entity> {
     let (meshes, materials, images) = assets;
-    if let Some(asset) = cache.load(lib, class, meshes, materials, images) {
-        s.target = s.target.or(beam_target);
-        spawn_effect_with(commands, &asset, s);
-    }
+    let asset = cache.load(lib, class, meshes, materials, images)?;
+    s.target = s.target.or(beam_target);
+    Some(spawn_effect_with(commands, &asset, s))
 }
 
 /// The hero as an effect host: his collision cylinder is half his model tall.

@@ -201,6 +201,9 @@ pub struct EmitterDef {
     pub coordinate_system: u8,
     /// Meshes keep their own material's blending (`UseMeshBlendMode`).
     pub mesh_blend: bool,
+    /// Particles start at the newest particle of this emitter (an index into
+    /// the effect's emitters, `AddLocationFromOtherEmitter`).
+    pub add_location_from: Option<usize>,
 }
 
 /// Rotation of an effect class (`Rotation` default property), pitch, yaw,
@@ -253,6 +256,7 @@ pub fn read_effect(pkg: &Package, class_name: &str) -> Option<Vec<EmitterDef>> {
         .collect();
     let n = out.len();
     for (k, d) in out.iter_mut().enumerate() {
+        d.add_location_from = d.add_location_from.filter(|&a| a != k && a < n);
         if let Some(t) = d.trail.as_mut() {
             // Pointing at itself or past the end means no attachment.
             t.attach = t.attach.filter(|&a| a != k && a < n);
@@ -368,6 +372,7 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
         revolution: b("UseRevolution", false).then(|| (rv("RevolutionCenterOffsetRange", zero), rv("RevolutionsPerSecondRange", zero))),
         coordinate_system: p.byte(pkg, "CoordinateSystem").unwrap_or(1),
         mesh_blend: b("UseMeshBlendMode", true),
+        add_location_from: p.int(pkg, "AddLocationFromOtherEmitter").filter(|&a| a >= 0).map(|a| a as usize),
     }
 }
 

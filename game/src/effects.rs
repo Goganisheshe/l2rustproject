@@ -182,6 +182,7 @@ fn build(
         if let Visual::Trail { trail, .. } = &mut em.visual {
             trail.attach = trail.attach.and_then(|a| index_map.get(a).copied().flatten());
         }
+        em.def.add_location_from = em.def.add_location_from.and_then(|a| index_map.get(a).copied().flatten());
     }
     let rotation = crate::streaming::ue_rotator(ue2::effect::effect_rotation(&pkg, class));
     Some(EffectAsset { emitters, rotation })
@@ -274,14 +275,18 @@ pub fn spawn_effect_targeted(
     spawn_effect_with(commands, asset, EffectSpawn { follow, target, ..EffectSpawn::at(transform) });
 }
 
-pub fn spawn_effect_with(commands: &mut Commands, asset: &Arc<EffectAsset>, s: EffectSpawn) {
+/// Makes an effect stop emitting; it goes once its particles are gone.
+#[derive(Component)]
+pub struct StopEffect;
+
+pub fn spawn_effect_with(commands: &mut Commands, asset: &Arc<EffectAsset>, s: EffectSpawn) -> Entity {
     let mut fx = Effect::new(asset.clone(), s.follow);
     fx.follow_offset = s.follow_offset;
     fx.target = s.target.or(s.flight.map(|f| f.target));
     fx.flight = s.flight.map(|flight| FlightState { flight, from: s.transform.translation, to: s.transform.translation, elapsed: 0.0 });
     let mut transform = s.transform;
     transform.rotation *= asset.rotation;
-    commands.spawn((fx, transform, Visibility::default()));
+    commands.spawn((fx, transform, Visibility::default())).id()
 }
 
 /// Which frame a particle's position and velocity are kept in.
@@ -508,14 +513,27 @@ fn emit(
     cache: Res<EffectCache>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut effects: Query<(Entity, &mut Effect, &mut Transform)>,
+    mut effects: Query<(Entity, &mut Effect, &mut Transform, Has<StopEffect>)>,
     followed: Query<&GlobalTransform, Without<Effect>>,
+    particles: Query<(&Particle, &Transform), Without<Effect>>,
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::rng();
     let Some(quad) = cache.quad.clone() else { return };
-    for (entity, mut fx, mut tr) in &mut effects {
+    // Newest particle of each emitter, for `AddLocationFromOtherEmitter`.
+    let mut newest: HashMap<(Entity, usize), (f32, Vec3)> = HashMap::new();
+    for (p, t) in &particles {
+        let pos = if p.ribbon.is_some() { p.pos } else { t.translation };
+        let slot = newest.entry((p.effect, p.emitter)).or_insert((f32::MAX, pos));
+        if p.age < slot.0 {
+            *slot = (p.age, pos);
+        }
+    }
+    for (entity, mut fx, mut tr, stop) in &mut effects {
         fx.age += dt;
+        if stop {
+            fx.stopped = true;
+        }
         let asset = fx.asset.clone();
         if let Some(f) = fx.follow {
             match followed.get(f) {
@@ -578,7 +596,9 @@ fn emit(
                     3 => local_velocity += away * rand_range(&mut rng, d.radial_velocity) * UU_TO_M,
                     _ => {}
                 }
-                let pos = tr.translation + tr.rotation * offset;
+                // Started from another emitter's newest particle, if it says so.
+                let origin = d.add_location_from.and_then(|k| newest.get(&(entity, k))).map_or(tr.translation, |n| n.1);
+                let pos = origin + tr.rotation * offset;
                 let velocity = tr.rotation * local_velocity;
                 let acceleration = tr.rotation * uu(d.acceleration);
                 let size = rand_vec(&mut rng, d.start_size);
@@ -599,7 +619,7 @@ fn emit(
                 let loss = uu_axes(rand_vec(&mut rng, d.velocity_loss));
                 let (p_pos, p_vel, p_acc) = match space {
                     Space::World => (pos, velocity, acceleration),
-                    Space::Effect => (offset, local_velocity, uu(d.acceleration)),
+                    Space::Effect => (tr.rotation.inverse() * (pos - tr.translation), local_velocity, uu(d.acceleration)),
                     Space::EffectLocation => (pos - tr.translation, velocity, acceleration),
                 };
                 let revolution = d.revolution.map(|(center, rate)| {
