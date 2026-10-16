@@ -21,6 +21,10 @@ use crate::mmo::{Hero, Phase};
 use crate::skinned::{spawn_model, Animated, Model, ModelCache};
 use crate::streaming::{ue_to_bevy, TileStreamer};
 
+/// Collision radius of a player character (Unreal units; the datapack has
+/// 6.5 to 9 depending on race and sex).
+pub const HERO_RADIUS: f32 = 8.0;
+
 /// Model kinds loaded per frame (each load decodes a skeletal mesh).
 const MODEL_LOADS_PER_FRAME: usize = 2;
 
@@ -238,7 +242,9 @@ impl HeroStats {
         self.matk_speed = cast_speed;
         // 500 000 / attack speed milliseconds between hits.
         self.atk_interval = 500.0 / atk_speed.max(1.0);
-        self.atk_range = (w("pAtkRange").unwrap_or(t.atk_range).max(40.0) + 30.0) * UU_TO_M;
+        // Lineage: a hit lands when the centres are within the weapon range
+        // plus both collision radii; the target's radius is added at use.
+        self.atk_range = (w("pAtkRange").unwrap_or(t.atk_range).max(20.0) + HERO_RADIUS) * UU_TO_M;
         self.hp = self.hp.min(self.max_hp);
         self.mp = self.mp.min(self.max_mp);
     }
@@ -703,12 +709,15 @@ pub fn award_kill(npc: &mut Npc, stats: &mut HeroStats, dp: &Datapack, log: &mut
 }
 
 /// Monster AI: aggro, chase, attack, leash back home.
+#[allow(clippy::too_many_arguments)]
 fn npc_ai(
     time: Res<Time>,
     mut log: ResMut<Log>,
     hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
     mut npcs: Query<(Entity, &mut Npc, &mut Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
+    streamer: Res<TileStreamer>,
+    world: Res<CollisionWorld>,
 ) {
     let dt = time.delta_secs();
     let (hero_tr, mut stats) = hero.into_inner();
@@ -765,10 +774,10 @@ fn npc_ai(
             NpcState::Chase => {
                 let to = (hero_pos - tr.translation).with_y(0.0);
                 tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
-                let reach = (npc.template.atk_range + npc.template.radius) * UU_TO_M + 0.5;
+                let reach = (npc.template.atk_range + npc.template.radius + HERO_RADIUS) * UU_TO_M;
                 if to.length() > reach {
                     tr.translation += to.normalize() * npc.template.run_speed * UU_TO_M * dt;
-                    tr.translation.y = hero_pos.y.max(tr.translation.y - 2.0 * dt);
+                    tr.translation.y = crate::mmo::settle(tr.translation, &streamer, &world);
                     if let Some(a) = anim.as_mut() {
                         a.play(&["Run", "Walk"], true);
                     }
@@ -798,6 +807,7 @@ fn npc_ai(
                 let to = (npc.home - tr.translation).with_y(0.0);
                 tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
                 tr.translation += to.normalize_or_zero() * (npc.template.walk_speed * 2.0 * UU_TO_M * dt).min(to.length());
+                tr.translation.y = crate::mmo::settle(tr.translation, &streamer, &world);
                 if let Some(a) = anim.as_mut() {
                     a.play(&["Walk", "Run"], true);
                 }
@@ -822,6 +832,7 @@ fn npc_ai(
                     } else {
                         tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
                         tr.translation += to.normalize() * (npc.template.walk_speed * UU_TO_M * dt).min(to.length());
+                        tr.translation.y = crate::mmo::settle(tr.translation, &streamer, &world);
                         if let Some(a) = anim.as_mut() {
                             a.play(&["Walk", "Run"], true);
                         }

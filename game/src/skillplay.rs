@@ -63,6 +63,8 @@ struct Cast {
 
 /// Gives the class tree's `autoGet` skills on reaching their level; the rest
 /// are learned for SP in the skill window (`skillwindow.rs`).
+/// `L2_ALL_SKILLS=1` (tests) gives every skill of the tree up to the hero's
+/// level for free, again after each class change.
 fn learn_skills(
     mut commands: Commands,
     book: Res<SkillBook>,
@@ -80,16 +82,20 @@ fn learn_skills(
         return;
     }
     let tree = book.class_tree(class_id, &dp);
+    let all = std::env::var_os("L2_ALL_SKILLS").is_some();
     let mut changed = true;
     while changed {
         changed = false;
         for entry in &tree {
             let have = skills.learned.get(&entry.skill).copied().unwrap_or(0);
-            if !entry.auto_get || entry.get_level > stats.level || entry.level != have + 1 || stats.sp < entry.sp {
+            let free = all;
+            if !(entry.auto_get || free) || entry.get_level > stats.level || entry.level != have + 1 || (!free && stats.sp < entry.sp) {
                 continue;
             }
             let Some(def) = book.skills.get(&entry.skill) else { continue };
-            stats.sp -= entry.sp;
+            if !free {
+                stats.sp -= entry.sp;
+            }
             skills.learned.insert(entry.skill, entry.level);
             if have == 0 && def.is_active() && skills.hotbar.len() < HOTBAR {
                 skills.hotbar.push(entry.skill);
