@@ -27,6 +27,7 @@ mod npcskills;
 mod rpg;
 mod save;
 mod services;
+mod skillfx;
 mod skillplay;
 mod skillwindow;
 mod statswindow;

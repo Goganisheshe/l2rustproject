@@ -14,11 +14,12 @@ use bevy::prelude::*;
 
 
 use crate::datapack::{Datapack, ServerSkill, SkillBook};
-use crate::effects::{spawn_effect_targeted, EffectCache};
+use crate::effects::{spawn_effect_with, EffectCache, EffectSpawn};
 use crate::gamedata::{GameData, SkillDef};
 use crate::l2assets::{L2Library, UU_TO_M};
 use crate::mmo::{Hero, Phase};
-use crate::rpg::{award_kill, Buff, HeroStats, Log, Npc, NpcState, Target};
+use crate::rpg::{award_kill, Buff, HeroStats, Log, Npc, NpcState, Target, HERO_RADIUS};
+use crate::skillfx::{is_projectile, place, place_shot, Pawn};
 use crate::skinned::Animated;
 
 /// Slots of one hotbar row (the client's shortcut bar).
@@ -77,9 +78,22 @@ pub struct HeroSkills {
     /// Skill id -> (seconds left, full reuse time).
     cooldowns: HashMap<u32, (f32, f32)>,
     cast: Option<Cast>,
+    /// Skills gone off whose projectile is still flying.
+    pending: Vec<PendingHit>,
     last_level: u32,
     last_sp: u64,
     last_class: u32,
+}
+
+/// A skill that lands when its projectile arrives.
+#[derive(Clone, Copy)]
+struct PendingHit {
+    skill: u32,
+    level: u32,
+    target: Option<Entity>,
+    /// Soulshot / spiritshot multiplier paid at release.
+    shot: f32,
+    left: f32,
 }
 
 impl HeroSkills {
@@ -388,7 +402,7 @@ fn run_cast(
     mut log: ResMut<Log>,
     mut lib: ResMut<L2Library>,
     mut cache: ResMut<EffectCache>,
-    mut assets: (ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>, ResMut<Assets<Image>>),
+    mut assets: FxAssets,
     items: Res<crate::items::ItemData>,
     hero: Single<(Entity, &Hero, &mut Transform, &mut HeroStats, &mut HeroSkills, Option<&mut crate::items::Inventory>)>,
     mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
@@ -399,6 +413,24 @@ fn run_cast(
     let (hero_e, hero, mut tr, mut stats, mut skills, inv) = hero.into_inner();
     for c in skills.cooldowns.values_mut() {
         c.0 -= dt;
+    }
+    // Projectiles arriving.
+    let mut landed = Vec::new();
+    skills.pending.retain_mut(|h| {
+        h.left -= dt;
+        let due = h.left <= 0.0;
+        if due {
+            landed.push(*h);
+        }
+        !due
+    });
+    for hit in landed {
+        let Some(def) = book.skills.get(&hit.skill).cloned() else { continue };
+        let visual = data.visuals.get(&hit.skill).cloned();
+        let caster = hero_pawn(hero_e, hero, &tr, &anims);
+        let target = hit.target.and_then(|e| npc_pawn(e, &npcs)).unwrap_or(caster);
+        land(hit, &def, visual.as_deref(), &caster, &target, &mut commands, &mut cache, &mut lib, &mut assets, &anims);
+        apply_effects(&def, hit.level, hit.target, &mut stats, &mut npcs, &dp, &mut log, hit.shot);
     }
     let Some(mut cast) = skills.cast.take() else { return };
     // Moving (or dying) before the skill goes off interrupts the cast.
@@ -412,14 +444,6 @@ fn run_cast(
     }
     let Some(def) = book.skills.get(&cast.skill).cloned() else { return };
     let visual: Option<Arc<SkillDef>> = data.visuals.get(&cast.skill).cloned();
-    let (meshes, materials, images) = &mut assets;
-    // Beams that end on an actor end on the cast's target.
-    let beam_target = cast.target;
-    let mut fx = |name: &str, at: Transform, follow: Option<Entity>| {
-        if let Some(asset) = cache.load(&mut lib, name, meshes, materials, images) {
-            spawn_effect_targeted(&mut commands, &asset, at, follow, beam_target);
-        }
-    };
     let target_pos = cast.target.and_then(|e| npcs.get(e).ok()).map(|(_, t)| t.translation);
     if let Some(p) = target_pos {
         let to = (p - tr.translation).with_y(0.0);
@@ -427,6 +451,9 @@ fn run_cast(
             tr.rotation = Quat::from_rotation_y((-to.z).atan2(to.x));
         }
     }
+    let caster = hero_pawn(hero_e, hero, &tr, &anims);
+    // Buffs and heals land on the hero himself.
+    let target = cast.target.and_then(|e| npc_pawn(e, &npcs)).unwrap_or(caster);
 
     // Animation: the combo's clips laid over the cast time.
     if cast.plan.is_empty() {
@@ -434,9 +461,10 @@ fn run_cast(
         let (plan, release_at) = plan_cast(visual.as_deref(), hero, model.as_deref(), cast.total);
         cast.plan = plan;
         cast.release_at = release_at;
+        let bone_of = |a: Entity, n: &[&str]| anims.get(a).ok().and_then(|x| x.bone(n));
         for spec in visual.iter().flat_map(|v| v.casting.iter()) {
-            let at = Transform::from_translation(tr.translation + Vec3::Y + tr.rotation * spec.offset).with_rotation(tr.rotation);
-            fx(&spec.class, at, spec.attached.then_some(hero_e));
+            let s = place(spec, &caster, Some(&target), &bone_of);
+            spawn_fx(&mut commands, &mut cache, &mut lib, &mut assets, &spec.class, s, Some(target.entity));
         }
     }
     let stage = cast.plan.iter().rposition(|s| cast.time >= s.start).unwrap_or(0);
@@ -452,21 +480,25 @@ fn run_cast(
     cast.time += dt;
     if !cast.fired && cast.time >= cast.release_at {
         cast.fired = true;
-        for spec in visual.iter().flat_map(|v| v.shot.iter()) {
-            let at = match (spec.on_target, target_pos) {
-                (true, Some(p)) => Transform::from_translation(p + Vec3::Y),
-                _ => Transform::from_translation(tr.translation + Vec3::Y + tr.rotation * spec.offset),
+        let flying_time = visual.as_ref().map_or(0.0, |v| v.flying_time);
+        let mut flies = false;
+        {
+            let bone_of = |a: Entity, n: &[&str]| anims.get(a).ok().and_then(|x| x.bone(n));
+            for spec in visual.iter().flat_map(|v| v.shot.iter()) {
+                flies |= is_projectile(spec, &caster, Some(&target), flying_time);
+                let s = place_shot(spec, &caster, Some(&target), flying_time, &bone_of);
+                spawn_fx(&mut commands, &mut cache, &mut lib, &mut assets, &spec.class, s, Some(target.entity));
             }
-            .with_rotation(tr.rotation);
-            fx(&spec.class, at, None);
-        }
-        let at_target = target_pos.unwrap_or(tr.translation);
-        for spec in visual.iter().flat_map(|v| v.explosion.iter()) {
-            fx(&spec.class, Transform::from_translation(at_target + Vec3::Y + spec.offset), None);
         }
         // Soulshots power physical skills, spiritshots magic.
         let shot = inv.map_or(1.0, |mut i| crate::items::use_shot(&mut i, &items, visual.as_ref().is_some_and(|v| v.magic)));
-        apply_effects(&def, cast.level, cast.target, &mut stats, &mut npcs, &dp, &mut log, shot);
+        let hit = PendingHit { skill: cast.skill, level: cast.level, target: cast.target, shot, left: flying_time };
+        if flies {
+            skills.pending.push(hit);
+        } else {
+            land(hit, &def, visual.as_deref(), &caster, &target, &mut commands, &mut cache, &mut lib, &mut assets, &anims);
+            apply_effects(&def, hit.level, hit.target, &mut stats, &mut npcs, &dp, &mut log, hit.shot);
+        }
     }
     if cast.time >= cast.total {
         if let Ok(mut a) = anims.get_mut(hero.actor) {
@@ -477,6 +509,56 @@ fn run_cast(
         return;
     }
     skills.cast = Some(cast);
+}
+
+type FxAssets<'a> = (ResMut<'a, Assets<Mesh>>, ResMut<'a, Assets<StandardMaterial>>, ResMut<'a, Assets<Image>>);
+
+/// Loads effect `class` and spawns it as `s` says; actor beams end on `beam_target`.
+fn spawn_fx(commands: &mut Commands, cache: &mut EffectCache, lib: &mut L2Library, assets: &mut FxAssets, class: &str, mut s: EffectSpawn, beam_target: Option<Entity>) {
+    let (meshes, materials, images) = assets;
+    if let Some(asset) = cache.load(lib, class, meshes, materials, images) {
+        s.target = s.target.or(beam_target);
+        spawn_effect_with(commands, &asset, s);
+    }
+}
+
+/// The hero as an effect host: his collision cylinder is half his model tall.
+fn hero_pawn(e: Entity, hero: &Hero, tr: &Transform, anims: &Query<&mut Animated>) -> Pawn {
+    let half_height = anims.get(hero.actor).map_or(0.9, |a| a.model.height * 0.5).max(0.3);
+    Pawn { entity: e, actor: Some(hero.actor), feet: tr.translation, rotation: tr.rotation, radius: HERO_RADIUS * UU_TO_M, half_height }
+}
+
+fn npc_pawn(e: Entity, npcs: &Query<(&mut Npc, &Transform), Without<Hero>>) -> Option<Pawn> {
+    let (n, t) = npcs.get(e).ok()?;
+    Some(Pawn {
+        entity: e,
+        actor: n.actor,
+        feet: t.translation,
+        rotation: t.rotation,
+        radius: (n.template.radius * UU_TO_M).max(0.2),
+        half_height: (n.template.height * UU_TO_M).max(0.3),
+    })
+}
+
+/// A skill reaching its target: the explosion effects.
+#[allow(clippy::too_many_arguments)]
+fn land(
+    hit: PendingHit,
+    _def: &ServerSkill,
+    visual: Option<&SkillDef>,
+    caster: &Pawn,
+    target: &Pawn,
+    commands: &mut Commands,
+    cache: &mut EffectCache,
+    lib: &mut L2Library,
+    assets: &mut FxAssets,
+    anims: &Query<&mut Animated>,
+) {
+    let bone_of = |a: Entity, n: &[&str]| anims.get(a).ok().and_then(|x| x.bone(n));
+    for spec in visual.iter().flat_map(|v| v.explosion.iter()) {
+        let s = place(spec, caster, Some(target), &bone_of);
+        spawn_fx(commands, cache, lib, assets, &spec.class, s, hit.target);
+    }
 }
 
 fn apply_effects(

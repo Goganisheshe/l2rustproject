@@ -1,8 +1,13 @@
 //! A small UE2-style particle system driving Lineage effect classes
 //! (`el_wind_strike_fl`, `soul_N_stick`, ...): sprite and mesh emitters with
-//! lifetimes, velocity, acceleration, size/color curves, fades, spin and
-//! texture atlases. Particles live in world space, like the engine default.
-//! Beam and trail emitters draw ribbons (`ribbon.rs`) rebuilt every frame.
+//! lifetimes, velocity, acceleration, size/color curves (with repeats), fades,
+//! opacity, spin, revolution, box / sphere / polar start shapes and texture
+//! atlases (random cells or played over the lifetime). Sprites face the camera,
+//! stretch along their velocity or lie in a plane (`UseDirectionAs`).
+//! Particles live in the effect's frame (the engine default) or in world
+//! space (`CoordinateSystem` 0). Beam and trail emitters draw ribbons
+//! (`ribbon.rs`) rebuilt every frame. An effect can follow an entity or fly to
+//! one (a skill's projectile).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -45,7 +50,7 @@ const EFFECT_PACKAGES: &[&str] = &[
 ];
 
 /// Hard cap per emitter instance, to keep hordes of projectiles affordable.
-const MAX_PARTICLES_PER_EMITTER: u32 = 40;
+const MAX_PARTICLES_PER_EMITTER: u32 = 60;
 /// Hard caps for ribbon geometry.
 const MAX_TRAIL_POINTS: usize = 64;
 const MAX_BEAM_POINTS: usize = 48;
@@ -74,6 +79,8 @@ struct Emitter {
 
 pub struct EffectAsset {
     emitters: Vec<Emitter>,
+    /// The class's own rotation, on top of the one the effect is spawned with.
+    rotation: Quat,
 }
 
 #[derive(Resource, Default)]
@@ -176,7 +183,8 @@ fn build(
             trail.attach = trail.attach.and_then(|a| index_map.get(a).copied().flatten());
         }
     }
-    Some(EffectAsset { emitters })
+    let rotation = crate::streaming::ue_rotator(ue2::effect::effect_rotation(&pkg, class));
+    Some(EffectAsset { emitters, rotation })
 }
 
 /// A running effect. Follows `follow` while it exists; once it is gone the
@@ -185,8 +193,11 @@ fn build(
 pub struct Effect {
     asset: Arc<EffectAsset>,
     follow: Option<Entity>,
+    /// Offset from the followed entity, in its frame.
+    follow_offset: Vec3,
     /// Where `PTEP_Actor` beams end.
     target: Option<Entity>,
+    flight: Option<FlightState>,
     age: f32,
     state: Vec<EmitterState>,
     stopped: bool,
@@ -200,6 +211,23 @@ struct EmitterState {
     alive: u32,
 }
 
+/// The effect flies from where it is spawned to `target` in `time` seconds
+/// (a skill's projectile), facing its way, and stops emitting on arrival.
+#[derive(Clone, Copy)]
+pub struct Flight {
+    pub target: Entity,
+    /// Added to the target's position (its chest).
+    pub aim: Vec3,
+    pub time: f32,
+}
+
+struct FlightState {
+    flight: Flight,
+    from: Vec3,
+    to: Vec3,
+    elapsed: f32,
+}
+
 impl Effect {
     pub fn new(asset: Arc<EffectAsset>, follow: Option<Entity>) -> Self {
         let mut rng = rand::rng();
@@ -208,14 +236,31 @@ impl Effect {
             .iter()
             .map(|e| EmitterState { delay: rand_range(&mut rng, e.def.initial_delay), ..default() })
             .collect();
-        Self { asset, follow, target: None, age: 0.0, state, stopped: false }
+        Self { asset, follow, follow_offset: Vec3::ZERO, target: None, flight: None, age: 0.0, state, stopped: false }
+    }
+}
+
+/// How to spawn an effect.
+pub struct EffectSpawn {
+    /// Place and facing (X axis = effect forward).
+    pub transform: Transform,
+    pub follow: Option<Entity>,
+    pub follow_offset: Vec3,
+    /// Beams that end on an actor end on it.
+    pub target: Option<Entity>,
+    pub flight: Option<Flight>,
+}
+
+impl EffectSpawn {
+    pub fn at(transform: Transform) -> Self {
+        EffectSpawn { transform, follow: None, follow_offset: Vec3::ZERO, target: None, flight: None }
     }
 }
 
 /// Spawns `effect` at `transform` (X axis = effect forward), optionally
 /// following an entity.
 pub fn spawn_effect(commands: &mut Commands, asset: &Arc<EffectAsset>, transform: Transform, follow: Option<Entity>) {
-    spawn_effect_targeted(commands, asset, transform, follow, None);
+    spawn_effect_with(commands, asset, EffectSpawn { follow, ..EffectSpawn::at(transform) });
 }
 
 /// Like `spawn_effect`; beams that end on an actor end on `target`.
@@ -226,9 +271,37 @@ pub fn spawn_effect_targeted(
     follow: Option<Entity>,
     target: Option<Entity>,
 ) {
-    let mut fx = Effect::new(asset.clone(), follow);
-    fx.target = target;
+    spawn_effect_with(commands, asset, EffectSpawn { follow, target, ..EffectSpawn::at(transform) });
+}
+
+pub fn spawn_effect_with(commands: &mut Commands, asset: &Arc<EffectAsset>, s: EffectSpawn) {
+    let mut fx = Effect::new(asset.clone(), s.follow);
+    fx.follow_offset = s.follow_offset;
+    fx.target = s.target.or(s.flight.map(|f| f.target));
+    fx.flight = s.flight.map(|flight| FlightState { flight, from: s.transform.translation, to: s.transform.translation, elapsed: 0.0 });
+    let mut transform = s.transform;
+    transform.rotation *= asset.rotation;
     commands.spawn((fx, transform, Visibility::default()));
+}
+
+/// Which frame a particle's position and velocity are kept in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Space {
+    World,
+    /// The effect's frame: moves and turns with it.
+    Effect,
+    /// World axes around the effect: moves with it, does not turn.
+    EffectLocation,
+}
+
+impl Space {
+    fn of(d: &EmitterDef) -> Self {
+        match d.coordinate_system {
+            0 | 2 => Space::World,
+            4 => Space::EffectLocation,
+            _ => Space::Effect,
+        }
+    }
 }
 
 #[derive(Component)]
@@ -242,13 +315,20 @@ struct Particle {
     acceleration: Vec3,
     base_scale: Vec3,
     color: [f32; 3],
-    spin: f32,
-    spin_rate: f32,
-    base_rotation: Quat,
+    /// Revolutions per axis (Unreal X, Y, Z) and their rate per second.
+    spin: Vec3,
+    spin_rate: Vec3,
     material: Option<Handle<StandardMaterial>>,
-    /// Ribbons keep their entity at the origin; this is the particle's own
-    /// position (the head of a trail).
+    /// Position in `space`. Ribbons keep their entity at the origin and this
+    /// in world space (the head of a trail).
     pos: Vec3,
+    space: Space,
+    /// Velocity lost per second, per axis (`space` axes).
+    loss: Vec3,
+    /// Orbit center and angular velocity (`space`).
+    revolution: Option<(Vec3, Vec3)>,
+    /// Fixed atlas cell; `None` plays the cells over the lifetime.
+    cell: Option<u32>,
     /// The effect's last transform, for ribbons outliving their effect.
     emitter_tr: Transform,
     ribbon: Option<Ribbon>,
@@ -315,6 +395,112 @@ fn uu(v: [f32; 3]) -> Vec3 {
     Vec3::new(v[0], v[2], v[1]) * UU_TO_M
 }
 
+/// Unreal per-axis values (not a position) on Bevy axes.
+fn uu_axes(v: [f32; 3]) -> Vec3 {
+    Vec3::new(v[0], v[2], v[1])
+}
+
+/// Spin values are revolutions in UE2; some Lineage effects store degrees.
+fn revolutions(v: f32) -> f32 {
+    if v.abs() > 4.0 {
+        v / 360.0
+    } else {
+        v
+    }
+}
+
+/// Where a particle starts, effect frame (meters): `StartLocationOffset` plus
+/// a point of the start shape.
+fn start_offset(d: &EmitterDef, rng: &mut impl Rng) -> Vec3 {
+    let shape = match d.location_shape {
+        // A random direction, `SphereRadiusRange` away.
+        1 => {
+            let dir = Vec3::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)).normalize_or(Vec3::Y);
+            dir * rand_range(rng, d.sphere_radius) * UU_TO_M
+        }
+        // X azimuth and Y polar angle (degrees), Z radius; Unreal axes.
+        2 => {
+            let p = rand_vec(rng, d.polar);
+            let (a, b) = (p[0].to_radians(), p[1].to_radians());
+            uu([p[2] * a.cos() * b.sin(), p[2] * a.sin() * b.sin(), p[2] * b.cos()])
+        }
+        _ => uu(rand_vec(rng, d.location_range)),
+    };
+    uu(d.location_offset) + shape
+}
+
+/// Atlas cells `[start, end)` of an emitter, with its columns and rows.
+fn cell_range(d: &EmitterDef) -> Option<(u32, u32, u32, u32)> {
+    let (u, v) = (d.subdivisions.0.max(1), d.subdivisions.1.max(1));
+    let count = u * v;
+    if count <= 1 {
+        return None;
+    }
+    let (start, end) = d.subdivision_range;
+    let end = if end == 0 { count } else { end.min(count) };
+    let start = start.min(end.saturating_sub(1));
+    Some((start, end.max(start + 1), u, v))
+}
+
+/// A random cell for `UseRandomSubdivision`; `None` when the cells play.
+fn fixed_cell(d: &EmitterDef, rng: &mut impl Rng) -> Option<u32> {
+    let (start, end, ..) = cell_range(d)?;
+    if d.random_subdivision {
+        Some(rng.random_range(start..end))
+    } else {
+        None
+    }
+}
+
+/// Atlas cell at relative time `t` (or the fixed one) as a UV transform.
+fn cell_uv(d: &EmitterDef, cell: Option<u32>, t: f32) -> Affine2 {
+    let Some((start, end, u, v)) = cell_range(d) else { return Affine2::IDENTITY };
+    let n = end - start;
+    let c = cell.unwrap_or_else(|| start + ((t.clamp(0.0, 1.0) * n as f32) as u32).min(n - 1));
+    let (cx, cy) = (c % u, c / u);
+    Affine2::from_scale_angle_translation(Vec2::new(1.0 / u as f32, 1.0 / v as f32), 0.0, Vec2::new(cx as f32 / u as f32, cy as f32 / v as f32))
+}
+
+/// `t` through a curve that repeats `repeats` more times over a lifetime.
+fn repeated(t: f32, repeats: f32) -> f32 {
+    if repeats > 0.0 {
+        (t * (repeats + 1.0)).fract()
+    } else {
+        t
+    }
+}
+
+/// Mesh particle spin (revolutions about Unreal Z, Y, X as yaw, pitch, roll).
+fn spin_rotation(spin: Vec3) -> Quat {
+    let r = |x: f32| (x * 65536.0) as i32;
+    crate::streaming::ue_rotator([r(spin.y), r(spin.x), r(spin.z)])
+}
+
+/// Orientation of a sprite quad (X right, Y up, Z facing) by `UseDirectionAs`.
+fn sprite_rotation(d: &EmitterDef, frame: Quat, pos: Vec3, velocity: Vec3, cam_pos: Vec3, cam_rot: Quat, spin: f32) -> Quat {
+    let basis = |n: Vec3| {
+        let a = n.any_orthonormal_vector();
+        Quat::from_mat3(&Mat3::from_cols(a, n.cross(a), n))
+    };
+    let moving = velocity.length_squared() > 1e-8;
+    match d.direction {
+        // Up along the velocity, turned toward the camera.
+        1 if moving => {
+            let up = velocity.normalize();
+            let right = up.cross((cam_pos - pos).normalize_or(Vec3::Z)).normalize_or(up.any_orthonormal_vector());
+            Quat::from_mat3(&Mat3::from_cols(right, up, right.cross(up)))
+        }
+        // Facing along the velocity.
+        3 if moving => basis(velocity.normalize()) * Quat::from_rotation_z(spin),
+        // Lying in a plane.
+        4 | 5 => {
+            let n = (frame * uu_axes(d.projection_normal)).normalize_or(Vec3::Y);
+            basis(n) * Quat::from_rotation_z(spin)
+        }
+        _ => cam_rot * Quat::from_rotation_z(spin),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit(
     mut commands: Commands,
@@ -330,17 +516,33 @@ fn emit(
     let Some(quad) = cache.quad.clone() else { return };
     for (entity, mut fx, mut tr) in &mut effects {
         fx.age += dt;
+        let asset = fx.asset.clone();
         if let Some(f) = fx.follow {
             match followed.get(f) {
                 Ok(g) => {
                     let (_, r, t) = g.to_scale_rotation_translation();
-                    tr.translation = t;
-                    tr.rotation = r;
+                    tr.translation = t + r * fx.follow_offset;
+                    tr.rotation = r * asset.rotation;
                 }
                 Err(_) => fx.stopped = true,
             }
         }
-        let asset = fx.asset.clone();
+        if let Some(fl) = fx.flight.as_mut() {
+            if let Ok(g) = followed.get(fl.flight.target) {
+                fl.to = g.translation() + fl.flight.aim;
+            }
+            fl.elapsed += dt;
+            let k = (fl.elapsed / fl.flight.time.max(0.01)).min(1.0);
+            let way = fl.to - fl.from;
+            tr.translation = fl.from + way * k;
+            if way.length_squared() > 1e-6 {
+                tr.rotation = Quat::from_rotation_arc(Vec3::X, way.normalize()) * asset.rotation;
+            }
+            if k >= 1.0 {
+                fx.flight = None;
+                fx.stopped = true;
+            }
+        }
         let stopped = fx.stopped;
         let target = fx.target;
         let mut finished = true;
@@ -367,47 +569,82 @@ fn emit(
                 st.budget -= 1.0;
                 st.spawned += 1;
                 st.alive += 1;
-                let offset = uu(d.location_offset) + uu(rand_vec(&mut rng, d.location_range));
+                let offset = start_offset(d, &mut rng);
+                let mut local_velocity = uu(rand_vec(&mut rng, d.velocity));
+                let away = offset.normalize_or_zero();
+                match d.velocity_from {
+                    1 => local_velocity *= away,
+                    2 => local_velocity *= -away,
+                    3 => local_velocity += away * rand_range(&mut rng, d.radial_velocity) * UU_TO_M,
+                    _ => {}
+                }
                 let pos = tr.translation + tr.rotation * offset;
-                let velocity = tr.rotation * uu(rand_vec(&mut rng, d.velocity));
+                let velocity = tr.rotation * local_velocity;
                 let acceleration = tr.rotation * uu(d.acceleration);
                 let size = rand_vec(&mut rng, d.start_size);
                 let cm = rand_vec(&mut rng, d.color_multiplier);
-                let spin = if d.spin { spin_radians(rand_range(&mut rng, d.start_spin[0])) } else { 0.0 };
-                let spin_rate = if d.spin { spin_radians(rand_range(&mut rng, d.spin_rate[0])) } else { 0.0 };
+                let (spin, spin_rate) = if d.spin {
+                    let mut rate = Vec3::from_array(rand_vec(&mut rng, d.spin_rate).map(revolutions));
+                    for k in 0..3 {
+                        if rng.random_range(0.0..1.0) > d.spin_ccw[k] {
+                            rate[k] = -rate[k];
+                        }
+                    }
+                    (Vec3::from_array(rand_vec(&mut rng, d.start_spin).map(revolutions)), rate)
+                } else {
+                    (Vec3::ZERO, Vec3::ZERO)
+                };
+                let space = Space::of(d);
+                // Position, velocity, acceleration, loss in the particle's space.
+                let loss = uu_axes(rand_vec(&mut rng, d.velocity_loss));
+                let (p_pos, p_vel, p_acc) = match space {
+                    Space::World => (pos, velocity, acceleration),
+                    Space::Effect => (offset, local_velocity, uu(d.acceleration)),
+                    Space::EffectLocation => (pos - tr.translation, velocity, acceleration),
+                };
+                let revolution = d.revolution.map(|(center, rate)| {
+                    let c = uu(rand_vec(&mut rng, center));
+                    let w = uu_axes(rand_vec(&mut rng, rate)) * std::f32::consts::TAU;
+                    match space {
+                        Space::World => (tr.translation + tr.rotation * c, tr.rotation * w),
+                        Space::Effect => (c, w),
+                        Space::EffectLocation => (tr.rotation * c, tr.rotation * w),
+                    }
+                });
                 let mut particle = Particle {
                     effect: entity,
                     emitter: i,
                     asset: asset.clone(),
                     age: 0.0,
                     life: rand_range(&mut rng, d.lifetime).max(0.02),
-                    velocity,
-                    acceleration,
+                    velocity: p_vel,
+                    acceleration: p_acc,
                     base_scale: Vec3::ONE,
                     color: cm,
                     spin,
                     spin_rate,
-                    base_rotation: tr.rotation,
                     material: None,
-                    pos,
+                    pos: p_pos,
+                    space,
+                    loss,
+                    revolution,
+                    cell: None,
                     emitter_tr: *tr,
                     ribbon: None,
                 };
-                let mut transform = Transform::from_translation(pos);
+                let transform = Transform::from_translation(pos);
                 match &em.visual {
                     Visual::Sprite { image } => {
-                        let s = if d.uniform_size { size[0] } else { size[0].max(size[1]) } * UU_TO_M * 2.0;
-                        particle.base_scale = Vec3::splat(s);
-                        let mat = materials.add(sprite_material(d, image.clone(), &mut rng));
+                        let (sx, sy) = if d.uniform_size { (size[0], size[0]) } else { (size[0], size[1]) };
+                        particle.base_scale = Vec3::new(sx, sy, 1.0) * UU_TO_M * 2.0;
+                        particle.cell = fixed_cell(d, &mut rng);
+                        let mat = materials.add(sprite_material(d, image.clone(), particle.cell));
                         particle.material = Some(mat.clone());
                         commands.spawn((particle, transform, Mesh3d(quad.clone()), MeshMaterial3d(mat), NotShadowCaster));
                     }
                     Visual::Mesh { parts } => {
                         let s = if d.uniform_size { Vec3::splat(size[0]) } else { Vec3::new(size[0], size[2], size[1]) };
                         particle.base_scale = s;
-                        if d.rotation_from_actor {
-                            transform.rotation = tr.rotation;
-                        }
                         let mut mats = Vec::new();
                         for part in parts {
                             let base = materials.get(&part.material).cloned().unwrap_or_default();
@@ -421,14 +658,21 @@ fn emit(
                         });
                     }
                     Visual::Beam { image, beam } => {
-                        let local_velocity = tr.rotation.inverse() * velocity;
                         let state = new_beam(beam, d, offset, local_velocity, particle.life, target, &mut rng);
+                        particle.pos = pos;
+                        particle.space = Space::World;
                         particle.velocity = Vec3::ZERO;
                         particle.acceleration = Vec3::ZERO;
                         let kind = RibbonKind::Beam(state);
                         spawn_ribbon(&mut commands, &mut meshes, &mut materials, particle, kind, d, image, size[0], &mut rng);
                     }
                     Visual::Trail { image, trail } => {
+                        // Trails keep the world-space head they always had.
+                        particle.pos = pos;
+                        particle.space = Space::World;
+                        particle.velocity = velocity;
+                        particle.acceleration = acceleration;
+                        particle.revolution = None;
                         let on_emitter = trail.follow_emitter.then_some(offset);
                         let kind = RibbonKind::Trail(TrailState { points: VecDeque::new(), on_emitter, attach: trail.attach });
                         spawn_ribbon(&mut commands, &mut meshes, &mut materials, particle, kind, d, image, size[0], &mut rng);
@@ -541,7 +785,9 @@ fn spawn_ribbon(
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     write_mesh(&mut mesh, first);
     let mesh = meshes.add(mesh);
-    let mat = materials.add(sprite_material(d, image.clone(), rng));
+    let cell = fixed_cell(d, rng);
+    particle.cell = cell;
+    let mat = materials.add(sprite_material(d, image.clone(), cell));
     particle.material = Some(mat.clone());
     particle.ribbon = Some(Ribbon { mesh: mesh.clone(), half_width: size.abs() * UU_TO_M, kind });
     commands.spawn((
@@ -563,15 +809,6 @@ fn write_mesh(mesh: &mut Mesh, m: ribbon::RibbonMesh) {
     mesh.insert_indices(Indices::U32(m.indices));
 }
 
-/// Spin values are revolutions in UE2; some Lineage effects store degrees.
-fn spin_radians(v: f32) -> f32 {
-    if v.abs() > 4.0 {
-        v.to_radians()
-    } else {
-        v * std::f32::consts::TAU
-    }
-}
-
 fn blend(d: &EmitterDef) -> AlphaMode {
     match d.draw_style {
         1 | 4 | 5 => AlphaMode::Blend,
@@ -580,37 +817,29 @@ fn blend(d: &EmitterDef) -> AlphaMode {
     }
 }
 
-fn sprite_material(d: &EmitterDef, image: Handle<Image>, rng: &mut impl Rng) -> StandardMaterial {
-    let (u, v) = d.subdivisions;
-    let uv_transform = if u > 1 || v > 1 {
-        let (u, v) = (u.max(1), v.max(1));
-        let (start, end) = d.subdivision_range;
-        let count = u * v;
-        let cell = if end > start { rng.random_range(start..=end.min(count - 1)) } else { start.min(count - 1) };
-        let (cx, cy) = (cell % u, cell / u);
-        Affine2::from_scale_angle_translation(
-            Vec2::new(1.0 / u as f32, 1.0 / v as f32),
-            0.0,
-            Vec2::new(cx as f32 / u as f32, cy as f32 / v as f32),
-        )
-    } else {
-        Affine2::IDENTITY
-    };
+fn sprite_material(d: &EmitterDef, image: Handle<Image>, cell: Option<u32>) -> StandardMaterial {
     StandardMaterial {
         base_color_texture: Some(image),
         unlit: true,
         alpha_mode: blend(d),
         double_sided: true,
         cull_mode: None,
-        uv_transform,
+        uv_transform: cell_uv(d, cell, 0.0),
         ..default()
     }
 }
 
 fn effect_material(d: &EmitterDef, base: StandardMaterial) -> StandardMaterial {
+    // `UseMeshBlendMode`: the mesh's own blending (additive or alpha, so the
+    // particle can still fade); otherwise the emitter's draw style.
+    let alpha_mode = match (d.mesh_blend, base.alpha_mode) {
+        (true, AlphaMode::Add) => AlphaMode::Add,
+        (true, _) => AlphaMode::Blend,
+        (false, _) => blend(d),
+    };
     StandardMaterial {
         unlit: true,
-        alpha_mode: blend(d),
+        alpha_mode,
         double_sided: true,
         cull_mode: None,
         base_color: Color::WHITE,
@@ -671,14 +900,21 @@ fn update_particles(
         if let Ok((_, fx_tr)) = effects.get(p.effect) {
             p.emitter_tr = *fx_tr;
         }
+        let frame = p.emitter_tr;
         let accel = p.acceleration;
         p.velocity += accel * dt;
-        p.spin += p.spin_rate * dt;
+        let loss = p.loss;
+        if loss != Vec3::ZERO {
+            let v = p.velocity;
+            p.velocity -= v * loss * dt;
+        }
+        let spin_rate = p.spin_rate;
+        p.spin += spin_rate * dt;
 
         let asset = p.asset.clone();
         let d = &asset.emitters[p.emitter].def;
         let t = p.age / p.life;
-        let size = curve(&d.size_scale, t, |a, b, k| a + (b - a) * k).unwrap_or(1.0);
+        let size = curve(&d.size_scale, repeated(t, d.size_repeats), |a, b, k| a + (b - a) * k).unwrap_or(1.0);
         if p.ribbon.is_some() {
             let step = p.velocity * dt;
             p.pos += step;
@@ -690,26 +926,39 @@ fn update_particles(
             };
             update_ribbon(&mut p, size, dt, cam_pos, now, attached, &targets, &mut meshes, &mut rng);
         } else {
-            tr.translation += p.velocity * dt;
-            tr.scale = p.base_scale * size;
-        }
-        match asset.emitters[p.emitter].visual {
-            Visual::Sprite { .. } => tr.rotation = cam_rot * Quat::from_rotation_z(p.spin),
-            Visual::Mesh { .. } => {
-                if !d.rotation_from_actor {
-                    tr.rotation = p.base_rotation;
-                }
-                tr.rotation *= Quat::from_rotation_x(p.spin_rate * dt);
+            let step = p.velocity * dt;
+            p.pos += step;
+            if let Some((center, w)) = p.revolution {
+                let rel = p.pos - center;
+                p.pos = center + Quat::from_scaled_axis(w * dt) * rel;
             }
-            Visual::Beam { .. } | Visual::Trail { .. } => {}
+            let (world, world_velocity) = match p.space {
+                Space::World => (p.pos, p.velocity),
+                Space::Effect => (frame.translation + frame.rotation * p.pos, frame.rotation * p.velocity),
+                Space::EffectLocation => (frame.translation + p.pos, p.velocity),
+            };
+            tr.translation = world;
+            tr.scale = p.base_scale * size;
+            match asset.emitters[p.emitter].visual {
+                Visual::Sprite { .. } => {
+                    let angle = p.spin.x * std::f32::consts::TAU;
+                    tr.rotation = sprite_rotation(d, frame.rotation, world, world_velocity, cam_pos, cam_rot, angle);
+                }
+                Visual::Mesh { .. } => {
+                    let turns = p.space == Space::Effect || d.rotation_from_actor;
+                    let base = if turns { frame.rotation } else { Quat::IDENTITY };
+                    tr.rotation = base * spin_rotation(p.spin);
+                }
+                Visual::Beam { .. } | Visual::Trail { .. } => {}
+            }
         }
 
         // Color: scale curve times multiplier, faded in/out over the lifetime.
-        let rgba = curve(&d.color_scale, t, |a: [f32; 4], b: [f32; 4], k| {
+        let rgba = curve(&d.color_scale, repeated(t, d.color_repeats), |a: [f32; 4], b: [f32; 4], k| {
             [0, 1, 2, 3].map(|i| a[i] + (b[i] - a[i]) * k)
         })
         .unwrap_or([1.0; 4]);
-        let mut alpha = rgba[3];
+        let mut alpha = rgba[3] * d.opacity;
         if let Some(end) = d.fade_in_end.filter(|&x| x > 0.0) {
             alpha *= (p.age / end).min(1.0);
         }
@@ -719,7 +968,11 @@ fn update_particles(
             }
         }
         let c = [rgba[0] * p.color[0], rgba[1] * p.color[1], rgba[2] * p.color[2]];
+        let animated_cell = p.cell.is_none() && cell_range(d).is_some() && matches!(asset.emitters[p.emitter].visual, Visual::Sprite { .. });
         if let Some(mut m) = p.material.as_ref().and_then(|h| materials.get_mut(h)) {
+            if animated_cell {
+                m.uv_transform = cell_uv(d, None, t);
+            }
             m.base_color = match m.alpha_mode {
                 // Additive: fading means darkening.
                 AlphaMode::Add => Color::srgb(c[0] * alpha, c[1] * alpha, c[2] * alpha),

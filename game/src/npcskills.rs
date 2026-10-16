@@ -5,11 +5,12 @@ use bevy::prelude::*;
 use rand::Rng;
 
 use crate::datapack::SkillBook;
-use crate::effects::{spawn_effect, EffectCache};
+use crate::effects::{spawn_effect_with, EffectCache};
 use crate::gamedata::GameData;
 use crate::l2assets::{L2Library, UU_TO_M};
 use crate::mmo::{Hero, Phase};
-use crate::rpg::{HeroStats, Log, Npc, NpcState};
+use crate::rpg::{HeroStats, Log, Npc, NpcState, HERO_RADIUS};
+use crate::skillfx::{is_projectile, place, place_shot, Pawn};
 use crate::skinned::Animated;
 
 pub struct NpcSkillsPlugin;
@@ -30,18 +31,27 @@ fn npc_skills(
     mut lib: ResMut<L2Library>,
     mut cache: ResMut<EffectCache>,
     mut assets: (ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>, ResMut<Assets<Image>>),
-    hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
-    mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
+    hero: Single<(Entity, &Hero, &Transform, &mut HeroStats)>,
+    mut npcs: Query<(Entity, &mut Npc, &Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
 ) {
     let dt = time.delta_secs();
-    let (hero_tr, mut stats) = hero.into_inner();
+    let (hero_e, hero, hero_tr, mut stats) = hero.into_inner();
+    let hero_half = anims.get(hero.actor).map_or(0.9, |a| a.model.height * 0.5).max(0.3);
+    let hero_pawn = Pawn {
+        entity: hero_e,
+        actor: Some(hero.actor),
+        feet: hero_tr.translation,
+        rotation: hero_tr.rotation,
+        radius: HERO_RADIUS * UU_TO_M,
+        half_height: hero_half,
+    };
     if stats.hp <= 0.0 {
         return;
     }
     let mut rng = rand::rng();
     let (meshes, materials, images) = &mut assets;
-    for (mut npc, tr) in &mut npcs {
+    for (npc_e, mut npc, tr) in &mut npcs {
         if npc.state != NpcState::Chase || npc.template.skills.is_empty() {
             continue;
         }
@@ -93,15 +103,35 @@ fn npc_skills(
                 a.restart(&names, false);
             }
         }
-        for spec in visual.into_iter().flat_map(|v| v.casting.iter().chain(v.shot.iter())) {
-            if let Some(asset) = cache.load(&mut lib, &spec.class, meshes, materials, images) {
-                let at = Transform::from_translation(tr.translation + Vec3::Y + tr.rotation * spec.offset).with_rotation(tr.rotation);
-                spawn_effect(&mut commands, &asset, at, None);
+        let caster = Pawn {
+            entity: npc_e,
+            actor: npc.actor,
+            feet: tr.translation,
+            rotation: tr.rotation,
+            radius: (npc.template.radius * UU_TO_M).max(0.2),
+            half_height: (npc.template.height * UU_TO_M).max(0.3),
+        };
+        let bone_of = |a: Entity, n: &[&str]| anims.get(a).ok().and_then(|x| x.bone(n));
+        let flying_time = visual.map_or(0.0, |v| v.flying_time);
+        let mut flies = false;
+        let mut spawns = Vec::new();
+        for spec in visual.into_iter().flat_map(|v| v.casting.iter()) {
+            spawns.push((spec.class.clone(), place(spec, &caster, Some(&hero_pawn), &bone_of)));
+        }
+        for spec in visual.into_iter().flat_map(|v| v.shot.iter()) {
+            flies |= is_projectile(spec, &caster, Some(&hero_pawn), flying_time);
+            spawns.push((spec.class.clone(), place_shot(spec, &caster, Some(&hero_pawn), flying_time, &bone_of)));
+        }
+        // The damage is already done; without a projectile the hit shows now.
+        if !flies {
+            for spec in visual.into_iter().flat_map(|v| v.explosion.iter()) {
+                spawns.push((spec.class.clone(), place(spec, &caster, Some(&hero_pawn), &bone_of)));
             }
         }
-        for spec in visual.into_iter().flat_map(|v| v.explosion.iter()) {
-            if let Some(asset) = cache.load(&mut lib, &spec.class, meshes, materials, images) {
-                spawn_effect(&mut commands, &asset, Transform::from_translation(hero_tr.translation + Vec3::Y + spec.offset), None);
+        for (class, mut s) in spawns {
+            if let Some(asset) = cache.load(&mut lib, &class, meshes, materials, images) {
+                s.target = s.target.or(Some(hero_e));
+                spawn_effect_with(&mut commands, &asset, s);
             }
         }
     }

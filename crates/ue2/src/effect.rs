@@ -167,6 +167,53 @@ pub struct EmitterDef {
     pub trail: Option<TrailDef>,
     /// `Disabled`: only a script would switch it on.
     pub disabled: bool,
+    /// Alpha multiplier of every particle (`Opacity`).
+    pub opacity: f32,
+    /// `UseDirectionAs` (EParticleDirectionUsage): 0 camera-facing, 1 up
+    /// along the velocity, 2 right, 3 facing along the velocity, 4 lying in
+    /// the plane of `projection_normal`, 5 up and normal...
+    pub direction: u8,
+    /// Plane normal of `direction` 4 / 5 (Unreal axes, effect frame).
+    pub projection_normal: [f32; 3],
+    /// Extra passes through the color / size curves over a lifetime.
+    pub color_repeats: f32,
+    pub size_repeats: f32,
+    /// `StartLocationShape`: 0 box (`location_range`), 1 sphere, 2 polar.
+    pub location_shape: u8,
+    pub sphere_radius: [f32; 2],
+    /// Polar start: X azimuth and Y polar angle in degrees, Z radius.
+    pub polar: [[f32; 2]; 3],
+    /// `GetVelocityDirectionFrom`: 0 none, 1 away from the emitter, 2 toward
+    /// it (both scale the start velocity per axis), 3 add `radial_velocity`.
+    pub velocity_from: u8,
+    pub radial_velocity: [f32; 2],
+    /// Fraction of the velocity lost per second, per axis.
+    pub velocity_loss: [[f32; 2]; 3],
+    /// Chance per axis that a particle spins counter-clockwise.
+    pub spin_ccw: [f32; 3],
+    /// Pick a random atlas cell; otherwise the cells play over the lifetime.
+    pub random_subdivision: bool,
+    /// Particles orbit `revolution_center` (effect frame) at these
+    /// revolutions per second per axis.
+    pub revolution: Option<([[f32; 2]; 3], [[f32; 2]; 3])>,
+    /// `CoordinateSystem`: 0 world space; 1 (the default) and Lineage's 3, 5,
+    /// 6, 7 move and turn with the effect; Lineage's 4 moves with it.
+    pub coordinate_system: u8,
+    /// Meshes keep their own material's blending (`UseMeshBlendMode`).
+    pub mesh_blend: bool,
+}
+
+/// Rotation of an effect class (`Rotation` default property), pitch, yaw,
+/// roll; the effect's emitters turn with it.
+pub fn effect_rotation(pkg: &Package, class_name: &str) -> [i32; 3] {
+    (0..pkg.exports.len())
+        .find(|&i| {
+            let e = &pkg.exports[i];
+            pkg.class_name(e) == "Class" && pkg.name(e.object_name).eq_ignore_ascii_case(class_name)
+        })
+        .and_then(|i| crate::props::class_defaults(pkg, i))
+        .and_then(|d| d.rotator(pkg, "Rotation"))
+        .unwrap_or([0; 3])
 }
 
 /// Finds the effect class `class_name` in `pkg` and reads its emitters.
@@ -258,6 +305,7 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
     } else {
         Vec::new()
     };
+    let mesh = kind == EmitterKind::Mesh;
     let beam = (kind == EmitterKind::Beam).then(|| beam(pkg, p));
     let trail = (kind == EmitterKind::Trail).then(|| trail(pkg, p));
     EmitterDef {
@@ -276,7 +324,8 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
         rate,
         initial_delay: p.range(pkg, "InitialDelayRange").unwrap_or([0.0, 0.0]),
         lifetime,
-        start_size: rv("StartSizeRange", [[100.0, 100.0]; 3]),
+        // MeshEmitter's default is a scale of 1, sprites' 100 UU.
+        start_size: rv("StartSizeRange", if mesh { [[1.0, 1.0]; 3] } else { [[100.0, 100.0]; 3] }),
         uniform_size: b("UniformSize", false),
         size_scale,
         color_scale,
@@ -303,6 +352,22 @@ fn emitter(pkg: &Package, class: &str, p: &Properties, object: &str) -> EmitterD
         beam,
         trail,
         disabled: b("Disabled", false),
+        opacity: f("Opacity", 1.0),
+        direction: p.byte(pkg, "UseDirectionAs").unwrap_or(0),
+        projection_normal: p.vector(pkg, "ProjectionNormal").unwrap_or([0.0, 0.0, 1.0]),
+        color_repeats: f("ColorScaleRepeats", 0.0).max(0.0),
+        size_repeats: f("SizeScaleRepeats", 0.0).max(0.0),
+        location_shape: p.byte(pkg, "StartLocationShape").unwrap_or(0),
+        sphere_radius: p.range(pkg, "SphereRadiusRange").unwrap_or([0.0, 0.0]),
+        polar: rv("StartLocationPolarRange", zero),
+        velocity_from: p.byte(pkg, "GetVelocityDirectionFrom").unwrap_or(0),
+        radial_velocity: p.range(pkg, "StartVelocityRadialRange").unwrap_or([0.0, 0.0]),
+        velocity_loss: rv("VelocityLossRange", zero),
+        spin_ccw: p.vector(pkg, "SpinCCWorCW").unwrap_or([0.5; 3]),
+        random_subdivision: b("UseRandomSubdivision", false),
+        revolution: b("UseRevolution", false).then(|| (rv("RevolutionCenterOffsetRange", zero), rv("RevolutionsPerSecondRange", zero))),
+        coordinate_system: p.byte(pkg, "CoordinateSystem").unwrap_or(1),
+        mesh_blend: b("UseMeshBlendMode", true),
     }
 }
 

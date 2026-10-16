@@ -153,6 +153,11 @@ impl Animated {
         !self.looping && self.model.clips.get(self.clip).is_none_or(|c| self.time >= c.frames - 0.02)
     }
 
+    /// Joint entity of the first bone found among `names` (case-insensitive).
+    pub fn bone(&self, names: &[&str]) -> Option<Entity> {
+        names.iter().find_map(|n| self.model.bone_names.iter().position(|b| b.eq_ignore_ascii_case(n))).and_then(|i| self.joints.get(i).copied())
+    }
+
     /// Switches to the first clip found among `names` (case-insensitive).
     pub fn play(&mut self, names: &[&str], looping: bool) {
         if let Some(i) = names.iter().find_map(|n| self.model.clip(n)) {

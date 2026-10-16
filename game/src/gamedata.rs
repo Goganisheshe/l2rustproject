@@ -26,12 +26,17 @@ use crate::l2assets::{L2Library, UU_TO_M};
 pub struct FxSpec {
     /// Effect class name, e.g. `el_wind_strike_ca`.
     pub class: String,
-    /// Spawn on the target instead of the caster.
+    /// Spawn on the target instead of the caster (`bSpawnOnTarget`, on
+    /// unless switched off).
     pub on_target: bool,
-    /// Attached to a body part (follows the caster); otherwise free-flying.
-    pub attached: bool,
-    /// Offset in the caster's frame, meters (X forward).
-    pub offset: Vec3,
+    /// `AttachOn` (L2EffectEmitter.AttachMethod): 0 none, 1 location, 2 right
+    /// hand, 3 left hand, 4 right arm, 5 left arm, 9 trail (follows the pawn)...
+    pub attach: u8,
+    /// `offset` counts collision cylinders (X, Y radius, Z half height) rather
+    /// than Unreal units (`bRelativeToCylinder`, on unless switched off).
+    pub cylinder: bool,
+    /// Unreal axes: X forward, Y right, Z up.
+    pub offset: [f32; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -206,11 +211,11 @@ fn fx_spec(pkg: &Package, r: ObjectRef) -> Option<FxSpec> {
     if class == "None" {
         return None;
     }
-    let o = p.vector(pkg, "offset").unwrap_or([0.0; 3]);
     Some(FxSpec {
         class,
-        on_target: p.bool(pkg, "bSpawnOnTarget").unwrap_or(false),
-        attached: p.byte(pkg, "AttachOn").is_some(),
-        offset: Vec3::new(o[0], o[2], o[1]) * UU_TO_M,
+        on_target: p.bool(pkg, "bSpawnOnTarget").unwrap_or(true),
+        attach: p.byte(pkg, "AttachOn").unwrap_or(0),
+        cylinder: p.bool(pkg, "bRelativeToCylinder").unwrap_or(true),
+        offset: p.vector(pkg, "offset").unwrap_or([0.0; 3]),
     })
 }
