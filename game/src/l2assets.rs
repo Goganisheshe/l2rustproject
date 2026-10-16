@@ -54,7 +54,7 @@ impl Plugin for L2AssetsPlugin {
         let lib = match Library::new(&root) {
             Ok(l) => Some(l),
             Err(e) => {
-                warn!("Lineage II client not found at {}: {e}", root.display());
+                error!("{} ({e})", crate::paths::missing_hint("Lineage II client", "client", "L2_CLIENT_DIR", &root, crate::paths::configured().0));
                 None
             }
         };
