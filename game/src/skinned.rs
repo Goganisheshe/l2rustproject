@@ -44,6 +44,17 @@ fn bone_keys<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
+/// Bind-pose model-space transforms of (name, parent, translation, rotation)
+/// bones, parents first.
+fn bind_globals(bones: &[(String, usize, Vec3, Quat)]) -> Vec<Mat4> {
+    let mut out: Vec<Mat4> = Vec::with_capacity(bones.len());
+    for (i, (_, parent, t, r)) in bones.iter().enumerate() {
+        let local = Mat4::from_rotation_translation(*r, *t);
+        out.push(if i == 0 { local } else { out[*parent] * local });
+    }
+    out
+}
+
 fn ue_pos(p: [f32; 3]) -> Vec3 {
     Vec3::new(p[0], p[2], p[1]) * UU_TO_M
 }
@@ -95,6 +106,12 @@ pub struct Attachment {
 }
 
 impl Model {
+    /// Length in seconds of the first clip found among `names`.
+    pub fn clip_seconds(&self, names: &[&str]) -> Option<f32> {
+        let c = &self.clips[names.iter().find_map(|n| self.clip(n))?];
+        Some(c.frames.max(1.0) / if c.rate > 0.0 { c.rate } else { 30.0 })
+    }
+
     /// Finds a clip by exact name, or by prefix for race-suffixed player
     /// clips like `run_1HS_MFighter`.
     pub fn clip(&self, name: &str) -> Option<usize> {
@@ -235,9 +252,25 @@ fn build_model(
             let idx = match bone_index.get(&key) {
                 Some(&j) => j,
                 None => {
-                    let parent = if i == 0 { 0 } else { remap.get(b.parent).copied().unwrap_or(0) as usize };
                     let j = bones.len();
-                    bones.push((b.name.clone(), parent, ue_pos(b.translation), ue_quat(b.rotation, j == 0, mode)));
+                    if i == 0 && j > 0 {
+                        // A part with a skeleton of its own (the elven and
+                        // dark elven ponytails): its root lies on a body bone
+                        // in the bind pose (the head) and hangs from it, so
+                        // it follows that bone instead of the body's root.
+                        let root = Mat4::from_rotation_translation(ue_quat(b.rotation, true, mode), ue_pos(b.translation));
+                        let globals = bind_globals(&bones);
+                        let at = root.w_axis.truncate();
+                        let host = (0..globals.len())
+                            .min_by(|x, y| globals[*x].w_axis.truncate().distance(at).total_cmp(&globals[*y].w_axis.truncate().distance(at)))
+                            .unwrap_or(0);
+                        let (_, r, t) = (globals[host].inverse() * root).to_scale_rotation_translation();
+                        debug!("{mesh_name}: {} hangs from {}", b.name, bones[host].0);
+                        bones.push((b.name.clone(), host, t, r.normalize()));
+                    } else {
+                        let parent = if i == 0 { 0 } else { remap.get(b.parent).copied().unwrap_or(0) as usize };
+                        bones.push((b.name.clone(), parent, ue_pos(b.translation), ue_quat(b.rotation, j == 0, mode)));
+                    }
                     bone_index.insert(key, j);
                     j
                 }

@@ -389,32 +389,43 @@ fn prepare_terrain(lib: &mut Library, pkg: &std::sync::Arc<ue2::Package>, t: &Te
     let hm_handle = lib.resolve(pkg, t.heightmap)?;
     let hm = read_heightmap(&hm_handle.package, hm_handle.export).ok()?;
     let (w, h) = (hm.width, hm.height);
+    if w < 2 || h < 2 {
+        return None;
+    }
     let [sx, sy, sz] = t.scale;
     let loc = t.location;
-    let mut positions = Vec::with_capacity(w * h);
-    let mut uvs = Vec::with_capacity(w * h);
-    let mut ys = Vec::with_capacity(w * h);
-    for j in 0..h {
-        for i in 0..w {
-            let z = (hm.data[j * w + i] as f32 - 32768.0) * sz / 256.0;
+    // A heightmap of w points spans only (w - 1) quads, one quad short of
+    // the tile (256 * 128 = 32768 UU), and its last row/column repeats the
+    // neighbour's first one. Repeat the last row and column once more so
+    // the terrain reaches the tile edge and meets the next tile without a
+    // gap.
+    let (vw, vh) = (w + 1, h + 1);
+    let mut positions = Vec::with_capacity(vw * vh);
+    let mut uvs = Vec::with_capacity(vw * vh);
+    let mut ys = Vec::with_capacity(vw * vh);
+    for j in 0..vh {
+        for i in 0..vw {
+            let (si, sj) = (i.min(w - 1), j.min(h - 1));
+            let z = (hm.data[sj * w + si] as f32 - 32768.0) * sz / 256.0;
             let p = [loc[0] + (i as f32 - w as f32 / 2.0) * sx, loc[1] + (j as f32 - h as f32 / 2.0) * sy, loc[2] + z];
             let b = ue_to_bevy(p);
             ys.push(b.y);
             positions.push(b.to_array());
-            uvs.push([i as f32 / (w - 1) as f32, j as f32 / (h - 1) as f32]);
+            uvs.push([i as f32 / w as f32, j as f32 / h as f32]);
         }
     }
-    let mut indices = Vec::with_capacity((w - 1) * (h - 1) * 6);
-    let mut holes = vec![false; w * h];
-    for j in 0..h - 1 {
-        for i in 0..w - 1 {
-            let quad = j * w + i;
+    let mut indices = Vec::with_capacity(w * h * 6);
+    let mut holes = vec![false; vw * vh];
+    for j in 0..h {
+        for i in 0..w {
+            // The added edge quads copy the flags of the quad beside them.
+            let quad = j.min(h - 2) * w + i.min(w - 2);
             if !t.quad_visible(quad) {
-                holes[quad] = true;
+                holes[j * vw + i] = true;
                 continue;
             }
-            let a = quad as u32;
-            let (b, c, d) = (a + 1, a + w as u32, a + w as u32 + 1);
+            let a = (j * vw + i) as u32;
+            let (b, c, d) = (a + 1, a + vw as u32, a + vw as u32 + 1);
             if t.quad_turned(quad) {
                 indices.extend_from_slice(&[a, c, d, a, d, b]);
             } else {
@@ -432,8 +443,8 @@ fn prepare_terrain(lib: &mut Library, pkg: &std::sync::Arc<ue2::Package>, t: &Te
     let field = HeightField {
         origin: Vec3::new(origin.x, 0.0, origin.z),
         step: Vec2::new(sx * UU_TO_M, sy * UU_TO_M),
-        width: w,
-        height: h,
+        width: vw,
+        height: vh,
         y: ys,
         holes,
     };
@@ -450,7 +461,7 @@ fn bake_layers(l: &mut Library, pkg: &std::sync::Arc<ue2::Package>, t: &Terrain,
     for (li, layer) in t.layers.iter().enumerate() {
         let Some(tex) = tex_of(l, layer.texture) else { continue };
         let alpha = if layer.alpha_map == ObjectRef::Null { None } else { tex_of(l, layer.alpha_map) };
-        let world_per_texel = (w as f32 - 1.0) * t.scale[0] / n as f32;
+        let world_per_texel = w as f32 * t.scale[0] / n as f32;
         let tex_px_per_world = 1.0 / layer.uscale.max(0.01);
         let footprint = (world_per_texel * tex_px_per_world).max(1.0) as usize;
         let (tw, th, small) = downsample(&tex, footprint.min(tex.width as usize));

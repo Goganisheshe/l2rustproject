@@ -235,6 +235,8 @@ impl HeroStats {
                 "CriticalRate" => apply(&mut self.crit),
                 "MaxHp" => apply(&mut self.max_hp),
                 "MaxMp" => apply(&mut self.max_mp),
+                "HpRegen" => apply(&mut self.hp_regen),
+                "MpRegen" => apply(&mut self.mp_regen),
                 _ => {}
             }
         }
@@ -511,7 +513,8 @@ impl Log {
 }
 
 /// Tab / gamepad RB: next monster in front of the camera; left click picks
-/// the NPC under the cursor; F / gamepad X attacks.
+/// the NPC under the cursor, or the hero himself (as does a click on the
+/// status window or gamepad Select); F / gamepad X attacks.
 #[allow(clippy::too_many_arguments)]
 pub fn pick_target(
     keys: Res<ButtonInput<KeyCode>>,
@@ -520,7 +523,7 @@ pub fn pick_target(
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut target: ResMut<Target>,
-    hero: Single<(&Transform, &mut HeroStats), With<Hero>>,
+    hero: Single<(Entity, &Transform, &mut HeroStats), With<Hero>>,
     npcs: Query<(Entity, &Npc, &Transform), Without<Hero>>,
     mut talk: ResMut<crate::dialog::TalkRequest>,
     mut move_to: ResMut<crate::mmo::MoveTarget>,
@@ -529,7 +532,11 @@ pub fn pick_target(
     streamer: Res<crate::streaming::TileStreamer>,
     world: Res<crate::collision::CollisionWorld>,
 ) {
-    let (hero_tr, mut stats) = hero.into_inner();
+    let (hero_e, hero_tr, mut stats) = hero.into_inner();
+    if gamepads.iter().any(|g| g.just_pressed(GamepadButton::Select)) {
+        target.0 = Some(hero_e);
+        stats.attacking = false;
+    }
     // L2_AUTOFIGHT: keep targeting and attacking the nearest monster (tests).
     let auto = std::env::var_os("L2_AUTOFIGHT").is_some() && stats.hp > 0.0;
     let target_dead = target.0.is_none_or(|e| npcs.get(e).map_or(true, |(_, n, _)| n.state == NpcState::Dead));
@@ -576,7 +583,19 @@ pub fn pick_target(
                     }
                 }
             }
-            if let Some((e, _)) = best {
+            // The hero's own model: a click on it targets himself.
+            {
+                let center = hero_tr.translation + Vec3::Y * 0.9;
+                let to = center - ray.origin;
+                let along = to.dot(*ray.direction);
+                if along > 0.0 && (to - *ray.direction * along).length() < 0.45 && best.is_none_or(|(_, d)| along < d) {
+                    best = Some((hero_e, along));
+                }
+            }
+            if best.is_some_and(|(e, _)| e == hero_e) {
+                target.0 = Some(hero_e);
+                stats.attacking = false;
+            } else if let Some((e, _)) = best {
                 if target.0 == Some(e) {
                     // Second click attacks a monster or talks to an NPC.
                     match npcs.get(e) {
@@ -621,11 +640,11 @@ fn hero_attack(
     mut target: ResMut<Target>,
     mut log: ResMut<Log>,
     items: Res<crate::items::ItemData>,
-    hero: Single<(&Hero, &mut Transform, &mut HeroStats, Option<&mut crate::items::Inventory>)>,
+    hero: Single<(Entity, &Hero, &mut Transform, &mut HeroStats, Option<&mut crate::items::Inventory>)>,
     mut npcs: Query<(&mut Npc, &Transform), Without<Hero>>,
     mut anims: Query<&mut Animated>,
 ) {
-    let (hero, mut tr, mut stats, inv) = hero.into_inner();
+    let (hero_e, hero, mut tr, mut stats, inv) = hero.into_inner();
     let dt = time.delta_secs();
     stats.atk_timer -= dt;
     if stats.hp <= 0.0 || !stats.attacking || input.move_dir.length() > 0.1 {
@@ -638,6 +657,11 @@ fn hero_attack(
         stats.attacking = false;
         return;
     };
+    // The hero does not hit himself; he stays selected.
+    if te == hero_e {
+        stats.attacking = false;
+        return;
+    }
     let Ok((mut npc, ntr)) = npcs.get_mut(te) else {
         target.0 = None;
         stats.attacking = false;
@@ -1080,24 +1104,29 @@ fn update_hud(
     target: Res<Target>,
     log: Res<Log>,
     dp: Res<Datapack>,
-    hero: Single<&HeroStats>,
+    hero: Single<(Entity, &HeroStats)>,
     npcs: Query<&Npc>,
     mut bars: Query<(&Bar, &mut Node)>,
     mut labels: Query<(&BarLabel, &mut Text), Without<LogText>>,
     mut window: Single<&mut Visibility, With<TargetWindow>>,
     mut log_text: Single<&mut Text, With<LogText>>,
 ) {
-    let s = *hero;
+    let (hero_e, s) = *hero;
     let cur = dp.exp.get(s.level as usize).copied().unwrap_or(0);
     let next = dp.exp.get(s.level as usize + 1).copied().unwrap_or(cur + 1);
     let exp_frac = (s.exp.saturating_sub(cur)) as f32 / (next.saturating_sub(cur)).max(1) as f32;
-    let tgt = target.0.and_then(|e| npcs.get(e).ok());
+    // (name, level, HP, max HP) of the target, the hero included.
+    let tgt = match target.0 {
+        Some(e) if e == hero_e => Some((dp.class_name(s.template.class_id).to_string(), s.level, s.hp, s.max_hp)),
+        Some(e) => npcs.get(e).ok().map(|n| (n.template.name.clone(), n.template.level, n.hp, n.template.hp)),
+        None => None,
+    };
     for (bar, mut node) in &mut bars {
         let frac = match bar.0 {
             BarKind::Hp => s.hp / s.max_hp.max(1.0),
             BarKind::Mp => s.mp / s.max_mp.max(1.0),
             BarKind::Exp => exp_frac,
-            BarKind::TargetHp => tgt.map_or(0.0, |n| n.hp / n.template.hp.max(1.0)),
+            BarKind::TargetHp => tgt.as_ref().map_or(0.0, |t| t.2 / t.3.max(1.0)),
         };
         node.width = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
     }
@@ -1106,9 +1135,7 @@ fn update_hud(
             BarKind::Hp => format!("HP {:.0} / {:.0}", s.hp.max(0.0), s.max_hp),
             BarKind::Mp => format!("MP {:.0} / {:.0}", s.mp, s.max_mp),
             BarKind::Exp => format!("Lv {}  EXP {:.2}%  SP {}", s.level, exp_frac * 100.0, s.sp),
-            BarKind::TargetHp => tgt.map_or(String::new(), |n| {
-                format!("{} (Lv {})  {:.0} / {:.0}", n.template.name, n.template.level, n.hp.max(0.0), n.template.hp)
-            }),
+            BarKind::TargetHp => tgt.as_ref().map_or(String::new(), |t| format!("{} (Lv {})  {:.0} / {:.0}", t.0, t.1, t.2.max(0.0), t.3)),
         };
     }
     **window = if tgt.is_some() { Visibility::Inherited } else { Visibility::Hidden };

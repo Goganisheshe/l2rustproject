@@ -146,6 +146,8 @@ pub fn ground_point(origin: Vec3, dir: Vec3, streamer: &TileStreamer, world: &Co
     }
 }
 
+/// The camera stays this far above the terrain (meters).
+const CAMERA_CLEARANCE: f32 = 0.4;
 /// Camera turn per pixel of mouse movement with the right button held.
 const MOUSE_RADIANS_PER_PIXEL: f32 = 0.005;
 /// Camera pitch limits: from nearly straight down to a little below the hero.
@@ -361,10 +363,10 @@ fn move_hero(
     streamer: Res<TileStreamer>,
     world: Res<CollisionWorld>,
     mut target: ResMut<MoveTarget>,
-    hero: Single<(&Hero, &mut Transform, &mut HeroStats)>,
+    hero: Single<(&Hero, &mut Transform, &mut HeroStats, Option<&crate::skillplay::HeroSkills>)>,
     mut anims: Query<&mut Animated>,
 ) {
-    let (hero, mut tr, mut stats) = hero.into_inner();
+    let (hero, mut tr, mut stats, skills) = hero.into_inner();
     if stats.hp <= 0.0 {
         target.0 = None;
         stats.sitting = false;
@@ -450,6 +452,9 @@ fn move_hero(
     if stats.attacking && !moving {
         return; // combat drives the animation
     }
+    if !moving && skills.is_some_and(|s| s.casting().is_some()) {
+        return; // so does casting (moving interrupts it)
+    }
     // Let the stand-up clip finish before idling.
     if !moving {
         if let Ok(a) = anims.get(hero.actor) {
@@ -503,6 +508,7 @@ fn orbit_camera(
     gamepads: Query<&Gamepad, With<crate::input::ActivePad>>,
     mut orbit: ResMut<Orbit>,
     world: Res<CollisionWorld>,
+    streamer: Res<TileStreamer>,
     hero: Single<&Transform, With<Hero>>,
     mut cam: Single<&mut Transform, (With<Camera3d>, Without<Hero>)>,
 ) {
@@ -536,8 +542,27 @@ fn orbit_camera(
     let focus = hero.translation + Vec3::Y * 1.5;
     let back = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0) * Vec3::Z;
     // Pull the camera in front of walls between it and the hero.
-    let dist = world.raycast(focus, back, orbit.distance).map_or(orbit.distance, |h| (h.t - 0.3).max(0.8));
+    let mut dist = world.raycast(focus, back, orbit.distance).map_or(orbit.distance, |h| (h.t - 0.3).max(0.8));
+    // Keep the terrain out of the way too, unless the hero is under it (a
+    // cave below a hill, the Kamael village): then only buildings count.
+    let open_sky = streamer.ground_y(focus).is_none_or(|t| t <= focus.y);
+    if open_sky {
+        const STEPS: usize = 16;
+        for k in 1..=STEPS {
+            let d = dist * k as f32 / STEPS as f32;
+            let p = focus + back * d;
+            if streamer.ground_y(p).is_some_and(|t| p.y < t + CAMERA_CLEARANCE) {
+                dist = (dist * (k - 1) as f32 / STEPS as f32).max(0.8);
+                break;
+            }
+        }
+    }
     cam.translation = focus + back * dist;
+    if open_sky {
+        if let Some(t) = streamer.ground_y(cam.translation) {
+            cam.translation.y = cam.translation.y.max(t + CAMERA_CLEARANCE);
+        }
+    }
     cam.look_at(focus, Vec3::Y);
 }
 
