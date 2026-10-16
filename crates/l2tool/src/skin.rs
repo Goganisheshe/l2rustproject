@@ -1,10 +1,9 @@
 //! `l2tool skin <client> <out dir> [name filter]`
 //!
 //! Dumps the skeletal meshes whose soft-skinned geometry is stored only in
-//! `FStaticLODModel::SkinningData` (no Lineage wedges, no source wedges), so
-//! that the layout of that stream can be worked out. Nobody documents it: UE
-//! Viewer leaves it as a TODO and only says it encodes a SkinPoints index, the
-//! UV and the bone influences of every soft wedge.
+//! `FStaticLODModel::SkinningData` (no Lineage wedges, no source wedges).
+//! The stream is decoded by `ue2::skel::decode_skinning` (its layout is
+//! described there); this dump is for checking it on new client versions.
 //!
 //! For every such mesh the output folder gets `<mesh>.txt` (counts, sections,
 //! the head of every array) and the raw arrays: `<mesh>.skinning.bin` (u32
