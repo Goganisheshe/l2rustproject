@@ -208,6 +208,10 @@ fn load_datapack(mut dp: ResMut<Datapack>, mut book: ResMut<SkillBook>) {
         dp.exp.len().saturating_sub(1),
         start.elapsed().as_secs_f32()
     );
+    if dp.classes.is_empty() || dp.npcs.is_empty() {
+        let hint = crate::paths::missing_hint("L2J datapack", "datapack", "L2_DATAPACK", &root, crate::paths::configured().1);
+        error!("{hint} Without it characters have no stats, there are no monsters and no towns.");
+    }
 }
 
 fn xml_files(dir: &Path, out: &mut Vec<PathBuf>) {
